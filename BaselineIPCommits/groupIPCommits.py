@@ -2,7 +2,7 @@
 from collections import defaultdict
 from collections import namedtuple
 
-f= open("log.txt")
+f= open("RawData/log.txt")
 
 lines = [line for line in f.readlines()]
 
