@@ -1,0 +1,55 @@
+From a0daaa61fc42de53e41eff139fc08cd70e56798a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E6=9D=8E=E5=B0=8F=E4=BF=9D?= <lixiaobao@mininglamp.com>
+Date: Wed, 27 Feb 2019 19:30:02 +0800
+Subject: [PATCH] HBASE-21540 and ut
+
+---
+ .../java/org/apache/hadoop/hbase/regionserver/HStore.java     |  2 +-
+ .../java/org/apache/hadoop/hbase/regionserver/TestHStore.java | 11 +++++++++++
+ 2 files changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/HStore.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/HStore.java
+index 79022a1ae9..c2ef4a2b98 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/HStore.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/HStore.java
+@@ -348,7 +348,7 @@ public class HStore implements Store, HeapSize, StoreConfigInformation, Propagat
+     MemoryCompactionPolicy inMemoryCompaction = null;
+     if (this.getTableName().isSystemTable()) {
+       inMemoryCompaction = MemoryCompactionPolicy.valueOf(
+-          conf.get("hbase.systemtables.compacting.memstore.type", "NONE"));
++          conf.get("hbase.systemtables.compacting.memstore.type", "NONE").toUpperCase());
+     } else {
+       inMemoryCompaction = family.getInMemoryCompaction();
+     }
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/regionserver/TestHStore.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/regionserver/TestHStore.java
+index 786334ebac..b0f5f08cf6 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/regionserver/TestHStore.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/regionserver/TestHStore.java
+@@ -68,6 +68,7 @@ import org.apache.hadoop.hbase.HBaseTestingUtility;
+ import org.apache.hadoop.hbase.HConstants;
+ import org.apache.hadoop.hbase.KeyValue;
+ import org.apache.hadoop.hbase.MemoryCompactionPolicy;
++import org.apache.hadoop.hbase.NamespaceDescriptor;
+ import org.apache.hadoop.hbase.PrivateCellUtil;
+ import org.apache.hadoop.hbase.TableName;
+ import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
+@@ -1703,6 +1704,16 @@ public class TestHStore {
+     assertEquals(8192L, sizeStore.getRegionSize(regionInfo2).getSize());
+   }
+ 
++  @Test
++  public void testInMemoryCompactionTypeWithLowerCase() throws IOException, InterruptedException {
++    Configuration conf = HBaseConfiguration.create();
++    conf.set("hbase.systemtables.compacting.memstore.type", "eager");
++    init(name.getMethodName(), conf, TableDescriptorBuilder.newBuilder(TableName.valueOf(NamespaceDescriptor.SYSTEM_NAMESPACE_NAME,"meta".getBytes())),
++            ColumnFamilyDescriptorBuilder.newBuilder(family)
++                    .setInMemoryCompaction(MemoryCompactionPolicy.NONE).build());
++    assertTrue(((MemStoreCompactor)((CompactingMemStore)store.memstore).compactor).toString().startsWith("eager".toUpperCase()));
++  }
++
+   private HStoreFile mockStoreFileWithLength(long length) {
+     HStoreFile sf = mock(HStoreFile.class);
+     StoreFileReader sfr = mock(StoreFileReader.class);
+-- 
+2.14.1
+

@@ -1,0 +1,16 @@
+diff --git a/hbase-rsgroup/src/main/java/org/apache/hadoop/hbase/rsgroup/RSGroupBasedLoadBalancer.java b/hbase-rsgroup/src/main/java/org/apache/hadoop/hbase/rsgroup/RSGroupBasedLoadBalancer.java
+index 69131f9..075bcab 100644
+--- a/hbase-rsgroup/src/main/java/org/apache/hadoop/hbase/rsgroup/RSGroupBasedLoadBalancer.java
++++ b/hbase-rsgroup/src/main/java/org/apache/hadoop/hbase/rsgroup/RSGroupBasedLoadBalancer.java
+@@ -231,6 +231,11 @@ public class RSGroupBasedLoadBalancer implements RSGroupableBalancer {
+         }
+         RSGroupInfo info = rsGroupInfoManager.getRSGroup(groupName);
+         List<ServerName> candidateList = filterOfflineServers(info, servers);
++        if (candidateList.isEmpty() && region.getTable().isSystemTable()) {
++          LOG.debug("Assigning " + region + " to online servers though its group " +
++              groupName + " does't have any online server");
++          candidateList = servers;
++        }
+         ServerName server = this.internalBalancer.randomAssignment(region,
+             candidateList);
+         if (server != null) {

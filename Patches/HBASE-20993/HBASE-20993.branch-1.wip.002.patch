@@ -1,0 +1,162 @@
+From 402bbe68789ce04686c14e1d8a49e72f3fc57f34 Mon Sep 17 00:00:00 2001
+From: Reid Chan <reidchan@apache.org>
+Date: Wed, 15 Aug 2018 21:25:09 +0800
+Subject: [PATCH] HBASE-20993 [Auth] IPC client fallback to simple auth allowed
+ doesn't work
+
+---
+ .../hadoop/hbase/ipc/BlockingRpcConnection.java    | 25 +++++++++++++++++++
+ .../org/apache/hadoop/hbase/ipc/RpcConnection.java |  2 +-
+ .../org/apache/hadoop/hbase/ipc/RpcServer.java     | 29 +++++++++++++---------
+ 3 files changed, 43 insertions(+), 13 deletions(-)
+
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/ipc/BlockingRpcConnection.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/ipc/BlockingRpcConnection.java
+index d5cf6a2748..9e125fa779 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/ipc/BlockingRpcConnection.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/ipc/BlockingRpcConnection.java
+@@ -66,6 +66,8 @@ import org.apache.hadoop.hbase.protobuf.generated.RPCProtos.ExceptionResponse;
+ import org.apache.hadoop.hbase.protobuf.generated.RPCProtos.RequestHeader;
+ import org.apache.hadoop.hbase.protobuf.generated.RPCProtos.ResponseHeader;
+ import org.apache.hadoop.hbase.security.HBaseSaslRpcClient;
++import org.apache.hadoop.hbase.security.SaslStatus;
++import org.apache.hadoop.hbase.security.SaslUtil;
+ import org.apache.hadoop.hbase.security.SaslUtil.QualityOfProtection;
+ import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
+ import org.apache.hadoop.hbase.util.ExceptionUtil;
+@@ -440,6 +442,7 @@ class BlockingRpcConnection extends RpcConnection implements Runnable {
+         OutputStream outStream = NetUtils.getOutputStream(socket, this.rpcClient.writeTO);
+         // Write out the preamble -- MAGIC, version, and auth to use.
+         writeConnectionHeaderPreamble(outStream);
++        readPreambleResponse(inStream);
+         if (useSasl) {
+           final InputStream in2 = inStream;
+           final OutputStream out2 = outStream;
+@@ -499,6 +502,28 @@ class BlockingRpcConnection extends RpcConnection implements Runnable {
+     thread.start();
+   }
+ 
++  private void readPreambleResponse(InputStream inStream) throws IOException {
++    DataInputStream resultCode = new DataInputStream(new BufferedInputStream(inStream));
++    int state = resultCode.readInt();
++    if (state == SaslStatus.SUCCESS.state) {
++      if (resultCode.readInt() == 0) {
++        return;
++      }
++      if (resultCode.readInt() == SaslUtil.SWITCH_TO_SIMPLE_AUTH) {
++        if (this.rpcClient.fallbackAllowed) {
++          useSasl = false;
++          return;
++        } else {
++          throw new DoNotRetryIOException("Server asks client fall back to SIMPLE auth, "
++            + "but client doesn't allow.");
++        }
++      }
++    }
++    if (state == SaslStatus.ERROR.state) {
++      readResponse();
++    }
++  }
++
+   /**
+    * Write the RPC header: {@code <MAGIC WORD -- 'HBas'> <ONEBYTE_VERSION> <ONEBYTE_AUTH_TYPE>}
+    */
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/ipc/RpcConnection.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/ipc/RpcConnection.java
+index 5e9e97e219..93881dd464 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/ipc/RpcConnection.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/ipc/RpcConnection.java
+@@ -58,7 +58,7 @@ abstract class RpcConnection {
+ 
+   protected final AuthMethod authMethod;
+ 
+-  protected final boolean useSasl;
++  protected boolean useSasl;
+ 
+   protected final Token<? extends TokenIdentifier> token;
+ 
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/ipc/RpcServer.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/ipc/RpcServer.java
+index 395093904f..490642028a 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/ipc/RpcServer.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/ipc/RpcServer.java
+@@ -1296,7 +1296,6 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
+ 
+     private AuthMethod authMethod;
+     private boolean saslContextEstablished;
+-    private boolean skipInitialSaslHandshake;
+     private ByteBuffer unwrappedData;
+     // When is this set?  FindBugs wants to know!  Says NP
+     private ByteBuffer unwrappedDataLengthBuffer = ByteBuffer.allocate(4);
+@@ -1573,6 +1572,7 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
+       preambleBuffer.flip();
+       for (int i = 0; i < HConstants.RPC_HEADER.length; i++) {
+         if (HConstants.RPC_HEADER[i] != preambleBuffer.get(i)) {
++          doRawSaslReply(SaslStatus.ERROR, null, null, null);
+           return doBadPreambleHandling("Expected HEADER=" +
+               Bytes.toStringBinary(HConstants.RPC_HEADER) + " but received HEADER=" +
+               Bytes.toStringBinary(preambleBuffer.array(), 0, HConstants.RPC_HEADER.length) +
+@@ -1583,18 +1583,24 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
+       byte authbyte = preambleBuffer.get(HConstants.RPC_HEADER.length + 1);
+       this.authMethod = AuthMethod.valueOf(authbyte);
+       if (version != CURRENT_VERSION) {
++        doRawSaslReply(SaslStatus.ERROR, null, null, null);
+         String msg = getFatalConnectionString(version, authbyte);
+         return doBadPreambleHandling(msg, new WrongVersionException(msg));
+       }
+       if (authMethod == null) {
++        doRawSaslReply(SaslStatus.ERROR, null, null, null);
+         String msg = getFatalConnectionString(version, authbyte);
+         return doBadPreambleHandling(msg, new BadAuthException(msg));
+       }
+       if (isSecurityEnabled && authMethod == AuthMethod.SIMPLE) {
++        // Case: (isSecurityEnabled && authMethod == AuthMethod.SIMPLE)
++        // server side uses non-simple auth, client side uses simple auth.
+         if (allowFallbackToSimpleAuth) {
++          doRawSaslReply(SaslStatus.SUCCESS, new IntWritable(0), null, null);
+           metrics.authenticationFallback();
+           authenticatedWithFallback = true;
+         } else {
++          doRawSaslReply(SaslStatus.ERROR, null, null, null);
+           AccessDeniedException ae = new AccessDeniedException("Authentication is required");
+           setupResponse(authFailedResponse, authFailedCall, ae, ae.getMessage());
+           responder.doRespond(authFailedCall);
+@@ -1602,16 +1608,20 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
+         }
+       }
+       if (!isSecurityEnabled && authMethod != AuthMethod.SIMPLE) {
++        // Case: (!isSecurityEnabled && authMethod != AuthMethod.SIMPLE)
++        // server side uses simple auth, client side uses non-simple auth.
+         doRawSaslReply(SaslStatus.SUCCESS, new IntWritable(
+             SaslUtil.SWITCH_TO_SIMPLE_AUTH), null, null);
+         authMethod = AuthMethod.SIMPLE;
+-        // client has already sent the initial Sasl message and we
+-        // should ignore it. Both client and server should fall back
+-        // to simple auth from now on.
+-        skipInitialSaslHandshake = true;
+-      }
+-      if (authMethod != AuthMethod.SIMPLE) {
++      } else if (authMethod != AuthMethod.SIMPLE) {
++        // Case: (isSecurityEnabled && authMethod != AuthMethod.SIMPLE)
++        // both server and client side use non-simple auth.
+         useSasl = true;
++        doRawSaslReply(SaslStatus.SUCCESS, new IntWritable(0), null, null);
++      } else {
++        // Case: (!isSecurityEnabled && authMethod == AuthMethod.SIMPLE)
++        // both server and client side use simple auth.
++        doRawSaslReply(SaslStatus.SUCCESS, new IntWritable(0), null, null);
+       }
+ 
+       preambleBuffer = null; // do not need it anymore
+@@ -1753,11 +1763,6 @@ public class RpcServer implements RpcServerInterface, ConfigurationObserver {
+     private void process() throws IOException, InterruptedException {
+       data.flip();
+       try {
+-        if (skipInitialSaslHandshake) {
+-          skipInitialSaslHandshake = false;
+-          return;
+-        }
+-
+         if (useSasl) {
+           saslReadAndProcess(data);
+         } else {
+-- 
+2.15.0
+

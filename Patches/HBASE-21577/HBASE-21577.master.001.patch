@@ -1,0 +1,37 @@
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java
+index 6242d3670f..f7c32087b4 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java
+@@ -62,6 +62,7 @@ import org.apache.hadoop.hbase.ChoreService;
+ import org.apache.hadoop.hbase.ClockOutOfSyncException;
+ import org.apache.hadoop.hbase.CoordinatedStateManager;
+ import org.apache.hadoop.hbase.DoNotRetryIOException;
++import org.apache.hadoop.hbase.DroppedSnapshotException;
+ import org.apache.hadoop.hbase.HBaseConfiguration;
+ import org.apache.hadoop.hbase.HBaseInterfaceAudience;
+ import org.apache.hadoop.hbase.HConstants;
+@@ -310,6 +311,7 @@ public class HRegionServer extends HasThread implements
+   // Go down hard. Used if file system becomes unavailable and also in
+   // debugging and unit tests.
+   private volatile boolean abortRequested;
++  private boolean isDroppedSnapshot = false;
+   public static final String ABORT_TIMEOUT = "hbase.regionserver.abort.timeout";
+   // Default abort timeout is 1200 seconds for safe
+   private static final long DEFAULT_ABORT_TIMEOUT = 1200000;
+@@ -1086,7 +1088,7 @@ public class HRegionServer extends HasThread implements
+     if (this.killed) {
+       // Just skip out w/o closing regions.  Used when testing.
+     } else if (abortRequested) {
+-      if (this.fsOk) {
++      if (this.fsOk && !isDroppedSnapshot) {
+         closeUserRegions(abortRequested); // Don't leave any open file handles
+       }
+       LOG.info("aborting server " + this.serverName);
+@@ -2390,6 +2392,7 @@ public class HRegionServer extends HasThread implements
+       LOG.error(HBaseMarkers.FATAL, msg);
+     }
+     this.abortRequested = true;
++    this.isDroppedSnapshot = cause instanceof DroppedSnapshotException;
+     // HBASE-4014: show list of coprocessors that were loaded to help debug
+     // regionserver crashes.Note that we're implicitly using
+     // java.util.HashSet's toString() method to print the coprocessor names.

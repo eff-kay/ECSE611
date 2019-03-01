@@ -1,0 +1,261 @@
+From 99ede08196177ed08682f4415f340538fed22928 Mon Sep 17 00:00:00 2001
+From: Mingdao Yang <mingdaoy@gmail.com>
+Date: Fri, 23 Nov 2018 17:49:38 +0800
+Subject: [PATCH] HBASE-21013 Backport "read part" of HBASE-18754 to all active
+ 1.x branches
+
+---
+ hbase-protocol/src/main/protobuf/HBase.proto       |   5 +++
+ .../hadoop/hbase/io/hfile/HFilePrettyPrinter.java  |   3 +-
+ .../hadoop/hbase/regionserver/StoreFile.java       |   2 +-
+ .../hbase/regionserver/TimeRangeTracker.java       |  44 ++++++++++++---------
+ .../hbase/mapreduce/TestHFileOutputFormat.java     |   3 +-
+ .../hbase/mapreduce/TestHFileOutputFormat2.java    |   3 +-
+ .../hbase/regionserver/TestTimeRangeTracker.java   |   6 +--
+ .../src/test/resources/dataV2/hbase-site.xml       |  32 +++++++++++++++
+ hbase-server/src/test/resources/dataV2/hfile21013  | Bin 0 -> 4910 bytes
+ 9 files changed, 69 insertions(+), 29 deletions(-)
+ create mode 100644 hbase-server/src/test/resources/dataV2/hbase-site.xml
+ create mode 100644 hbase-server/src/test/resources/dataV2/hfile21013
+
+diff --git a/hbase-protocol/src/main/protobuf/HBase.proto b/hbase-protocol/src/main/protobuf/HBase.proto
+index 67645d4..14f19dc 100644
+--- a/hbase-protocol/src/main/protobuf/HBase.proto
++++ b/hbase-protocol/src/main/protobuf/HBase.proto
+@@ -99,6 +99,11 @@ message TimeRange {
+   optional uint64 to = 2;
+ }
+ 
++message TimeRangeTracker {
++  optional uint64 from = 1;
++  optional uint64 to = 2;
++}
++
+ /* ColumnFamily Specific TimeRange */
+ message ColumnFamilyTimeRange {
+   required bytes column_family = 1;
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/io/hfile/HFilePrettyPrinter.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/io/hfile/HFilePrettyPrinter.java
+index d43ebd6..3a5296d 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/io/hfile/HFilePrettyPrinter.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/io/hfile/HFilePrettyPrinter.java
+@@ -427,8 +427,7 @@ public class HFilePrettyPrinter extends Configured implements Tool {
+         out.println(seqid);
+       } else if (Bytes.compareTo(e.getKey(), Bytes.toBytes("TIMERANGE")) == 0) {
+ 
+-        TimeRangeTracker timeRangeTracker = new TimeRangeTracker();
+-        Writables.copyWritable(e.getValue(), timeRangeTracker);
++        TimeRangeTracker timeRangeTracker = TimeRangeTracker.getTimeRangeTracker(e.getValue());
+         out.println(timeRangeTracker.getMin() + "...." + timeRangeTracker.getMax());
+       } else if (Bytes.compareTo(e.getKey(), FileInfo.AVG_KEY_LEN) == 0
+           || Bytes.compareTo(e.getKey(), FileInfo.AVG_VALUE_LEN) == 0) {
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/StoreFile.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/StoreFile.java
+index c797624..469f9fb 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/StoreFile.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/StoreFile.java
+@@ -934,7 +934,7 @@ public class StoreFile {
+      * Add TimestampRange and earliest put timestamp to Metadata
+      */
+     public void appendTrackedTimestampsToMetadata() throws IOException {
+-      appendFileInfo(TIMERANGE_KEY,WritableUtils.toByteArray(timeRangeTracker));
++      appendFileInfo(TIMERANGE_KEY, TimeRangeTracker.toByteArray(timeRangeTracker));
+       appendFileInfo(EARLIEST_PUT_TS, Bytes.toBytes(earliestPutTs));
+     }
+ 
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/TimeRangeTracker.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/TimeRangeTracker.java
+index 12cc7bf..51e017c 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/TimeRangeTracker.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/TimeRangeTracker.java
+@@ -18,8 +18,10 @@
+  */
+ package org.apache.hadoop.hbase.regionserver;
+ 
+-import java.io.DataInput;
+-import java.io.DataOutput;
++import java.io.ByteArrayInputStream;
++import java.io.ByteArrayOutputStream;
++import java.io.DataInputStream;
++import java.io.DataOutputStream;
+ import java.io.IOException;
+ import java.util.concurrent.atomic.AtomicLong;
+ 
+@@ -29,6 +31,8 @@ import org.apache.hadoop.hbase.classification.InterfaceAudience;
+ import org.apache.hadoop.hbase.io.TimeRange;
+ import org.apache.hadoop.hbase.util.Writables;
+ import org.apache.hadoop.io.Writable;
++import org.apache.hadoop.hbase.protobuf.generated.HBaseProtos;
++import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
+ /**
+  * Stores minimum and maximum timestamp values, it is [minimumTimestamp, maximumTimestamp] in
+  * interval notation.
+@@ -44,7 +48,7 @@ import org.apache.hadoop.io.Writable;
+  * at read time via an instance of {@link TimeRange} to test if Cells fit the StoreFile TimeRange.
+  */
+ @InterfaceAudience.Private
+-public class TimeRangeTracker implements Writable {
++public class TimeRangeTracker {
+   static final long INITIAL_MIN_TIMESTAMP = Long.MAX_VALUE;
+   static final long INITIAL_MAX_TIMESTAMP = -1L;
+ 
+@@ -157,19 +161,15 @@ public class TimeRangeTracker implements Writable {
+     return maximumTimestamp.get();
+   }
+ 
+-  @Override
+-  public void write(final DataOutput out) throws IOException {
+-    out.writeLong(minimumTimestamp.get());
+-    out.writeLong(maximumTimestamp.get());
+-  }
+-
+-  @Override
+-  public void readFields(final DataInput in) throws IOException {
+-
+-    this.minimumTimestamp.set(in.readLong());
+-    this.maximumTimestamp.set(in.readLong());
++  public static byte[] toByteArray(TimeRangeTracker tracker) throws IOException {
++    try (ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
++      try (DataOutputStream dos = new DataOutputStream(bos)) {
++        dos.writeLong(tracker.getMin());
++        dos.writeLong(tracker.getMax());
++        return bos.toByteArray();
++        }
++      }
+   }
+-
+   @Override
+   public String toString() {
+     return "[" + minimumTimestamp.get() + "," + maximumTimestamp.get() + "]";
+@@ -182,10 +182,16 @@ public class TimeRangeTracker implements Writable {
+    */
+   public static TimeRangeTracker getTimeRangeTracker(final byte [] timeRangeTrackerBytes)
+   throws IOException {
+-    if (timeRangeTrackerBytes == null) return null;
+-    TimeRangeTracker trt = new TimeRangeTracker();
+-    Writables.copyWritable(timeRangeTrackerBytes, trt);
+-    return trt;
++    if (ProtobufUtil.isPBMagicPrefix(timeRangeTrackerBytes)) {
++      int pblen = ProtobufUtil.lengthOfPBMagic();
++      HBaseProtos.TimeRangeTracker.Builder builder = HBaseProtos.TimeRangeTracker.newBuilder();
++      ProtobufUtil.mergeFrom(builder, timeRangeTrackerBytes, pblen, timeRangeTrackerBytes.length - pblen);
++      return new TimeRangeTracker(builder.getFrom(), builder.getTo());
++    } else {
++      try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(timeRangeTrackerBytes))) {
++        return new TimeRangeTracker(in.readLong(), in.readLong());
++      }
++    }
+   }
+ 
+   /**
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/mapreduce/TestHFileOutputFormat.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/mapreduce/TestHFileOutputFormat.java
+index 89cbb47..d8d2d86 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/mapreduce/TestHFileOutputFormat.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/mapreduce/TestHFileOutputFormat.java
+@@ -286,8 +286,7 @@ public class TestHFileOutputFormat  {
+       assertNotNull(range);
+ 
+       // unmarshall and check values.
+-      TimeRangeTracker timeRangeTracker = new TimeRangeTracker();
+-      Writables.copyWritable(range, timeRangeTracker);
++      TimeRangeTracker timeRangeTracker = TimeRangeTracker.getTimeRangeTracker(range);
+       LOG.info(timeRangeTracker.getMin() + "...." + timeRangeTracker.getMax());
+       assertEquals(1000, timeRangeTracker.getMin());
+       assertEquals(2000, timeRangeTracker.getMax());
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/mapreduce/TestHFileOutputFormat2.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/mapreduce/TestHFileOutputFormat2.java
+index d88af6e..9ab4ce4 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/mapreduce/TestHFileOutputFormat2.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/mapreduce/TestHFileOutputFormat2.java
+@@ -367,8 +367,7 @@ public class TestHFileOutputFormat2  {
+       assertNotNull(range);
+ 
+       // unmarshall and check values.
+-      TimeRangeTracker timeRangeTracker = new TimeRangeTracker();
+-      Writables.copyWritable(range, timeRangeTracker);
++      TimeRangeTracker timeRangeTracker = TimeRangeTracker.getTimeRangeTracker(range);
+       LOG.info(timeRangeTracker.getMin() +
+           "...." + timeRangeTracker.getMax());
+       assertEquals(1000, timeRangeTracker.getMin());
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/regionserver/TestTimeRangeTracker.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/regionserver/TestTimeRangeTracker.java
+index 4e61067..723e0b2 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/regionserver/TestTimeRangeTracker.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/regionserver/TestTimeRangeTracker.java
+@@ -55,7 +55,8 @@ public class TestTimeRangeTracker {
+   @Test
+   public void testTimeRangeTrackerNullIsSameAsTimeRangeNull() throws IOException {
+     TimeRangeTracker src = new TimeRangeTracker(1, 2);
+-    byte [] bytes = Writables.getBytes(src);
++    //byte [] bytes = Writables.getBytes(src);
++    byte [] bytes = TimeRangeTracker.toByteArray(src);
+     TimeRange tgt = TimeRangeTracker.getTimeRange(bytes);
+     assertEquals(src.getMin(), tgt.getMin());
+     assertEquals(src.getMax(), tgt.getMax());
+@@ -64,8 +65,7 @@ public class TestTimeRangeTracker {
+   @Test
+   public void testSerialization() throws IOException {
+     TimeRangeTracker src = new TimeRangeTracker(1, 2);
+-    TimeRangeTracker tgt = new TimeRangeTracker();
+-    Writables.copyWritable(src, tgt);
++    TimeRangeTracker tgt = TimeRangeTracker.getTimeRangeTracker(TimeRangeTracker.toByteArray(src));
+     assertEquals(src.getMin(), tgt.getMin());
+     assertEquals(src.getMax(), tgt.getMax());
+   }
+diff --git a/hbase-server/src/test/resources/dataV2/hbase-site.xml b/hbase-server/src/test/resources/dataV2/hbase-site.xml
+new file mode 100644
+index 0000000..6d47b2b
+--- /dev/null
++++ b/hbase-server/src/test/resources/dataV2/hbase-site.xml
+@@ -0,0 +1,32 @@
++<?xml version="1.0"?>
++<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
++<!--
++/**
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++-->
++<configuration>
++  <property>
++    <name>hbase.rootdir</name>
++    <value>/path/to/hbase/hbase-server/src/test/resources/dataV2/</value>
++  </property>
++  <property>
++    <name>hbase.zookeeper.property.dataDir</name>
++    <value>/path/to/hbase/hbase-server/src/test/resources/dataV2/</value>
++  </property>
++</configuration>
+diff --git a/hbase-server/src/test/resources/dataV2/hfile21013 b/hbase-server/src/test/resources/dataV2/hfile21013
+new file mode 100644
+index 0000000000000000000000000000000000000000..bfaf536a44b947137ab522aafd20c7785f392d16
+GIT binary patch
+literal 4910
+zcmeI0&ubGw6vt<in8rbClPywzVX6`QL1U9#q=%A8GHKWBX5(fOlXw`nF=>>_hWMk1
+z;K73m6~UtiK|Bbaz4YFrP`rqE@{jQ7!M@34X%qYdJj}pjnR(y0@4e5wy=;Lnk~2$}
+z5kmLCx_?J2fKV3p=p~pA7Dl0gx0wpGyDmc7`trBU5245I#-mOuG^R*{VofSOeU*yz
+zp)o}U6m6;4-I0n+_=TQ*nlr5;l#&MZ5wOT)DVK7nm?}gUL+s1>cSfP%*fta51Xz4h
+zOyJO8TlznWZ!BGXbKoVS3x93<&CmaOKmVg>nA9j2A(QqR?A1gj?Q<npD?Sh6IULQI
+zwrz0;VASEPS)s9@W8cJQv0k7iWt10*WtdH#w`*k<i}?BQDSV6)$24e_@k)(xRuxW3
+z8K1z>5^eH2F>939sZ%xVa!iz~;p2GPBoHI>f+{91DFY$17P)RakjSc#Jc9@>yc!a<
+zSfs%%YE_x-P)IfO__c)bNjxnCReFOPg)!e0K7$W4!=er;uh7_xU!i>N?ubfz-Mbr|
+zB&n~6NN!SDsSX|L`!3mv?+oKOo|VqLLkUn4IrbU+eD((?@KLD{?TSw1jgF7f=__wr
+zVuma_9E)W@v@~&9=oTCXN8ClvQ()R?@1KVcoS`k)EDT5A9khNkM|>>j604DqfthV>
+zE*}4W;i9&Pt_8E&DypE?f;U)Cx_!6Z>m+;b9nb40du#54PO{W_QWu{~qEyd&_xtX^
+redrBt!=S092q*%IfFhs>C<2OrBA^H;0*Zhlpa>`e{}BQBJrLXjwUgZ%
+
+literal 0
+HcmV?d00001
+
+-- 
+2.7.4
+

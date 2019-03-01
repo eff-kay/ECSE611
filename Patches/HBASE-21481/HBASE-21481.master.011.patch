@@ -1,0 +1,510 @@
+From c2710316ace8302c0c7a065cfd115b79bacf8d6f Mon Sep 17 00:00:00 2001
+From: Reid Chan <reidchan@apache.org>
+Date: Tue, 26 Feb 2019 11:01:05 +0800
+Subject: [PATCH] HBASE-21481 [acl] Superuser's permissions should not be
+ granted or revoked by any non-su global admin
+
+---
+ .../apache/hadoop/hbase/security/Superusers.java   |  9 ++-
+ .../org/apache/hadoop/hbase/security/User.java     |  9 ++-
+ .../apache/hadoop/hbase/security/UserProvider.java | 10 +++
+ .../hbase/security/access/AccessChecker.java       | 46 ++++++++++-
+ .../hbase/security/access/AccessController.java    |  1 +
+ .../hadoop/hbase/security/access/AuthManager.java  | 67 ++++++++--------
+ .../hbase/security/access/SecureTestUtil.java      |  4 +
+ .../hbase/security/access/TestRpcAccessChecks.java | 92 +++++++++++++++++++---
+ 8 files changed, 187 insertions(+), 51 deletions(-)
+
+diff --git a/hbase-common/src/main/java/org/apache/hadoop/hbase/security/Superusers.java b/hbase-common/src/main/java/org/apache/hadoop/hbase/security/Superusers.java
+index 108919740c..fa1548ed85 100644
+--- a/hbase-common/src/main/java/org/apache/hadoop/hbase/security/Superusers.java
++++ b/hbase-common/src/main/java/org/apache/hadoop/hbase/security/Superusers.java
+@@ -71,7 +71,8 @@ public final class Superusers {
+     String[] superUserList = conf.getStrings(SUPERUSER_CONF_KEY, new String[0]);
+     for (String name : superUserList) {
+       if (AuthUtil.isGroupPrincipal(name)) {
+-        superGroups.add(AuthUtil.getGroupName(name));
++        // Let's keep the '@' for distinguishing from user.
++        superGroups.add(name);
+       } else {
+         superUsers.add(name);
+       }
+@@ -94,7 +95,7 @@ public final class Superusers {
+       return true;
+     }
+     for (String group : user.getGroupNames()) {
+-      if (superGroups.contains(group)) {
++      if (superGroups.contains(AuthUtil.toGroupEntry(group))) {
+         return true;
+       }
+     }
+@@ -105,6 +106,10 @@ public final class Superusers {
+     return superUsers;
+   }
+ 
++  public static Collection<String> getSuperGroups() {
++    return superGroups;
++  }
++
+   public static User getSystemUser() {
+     return systemUser;
+   }
+diff --git a/hbase-common/src/main/java/org/apache/hadoop/hbase/security/User.java b/hbase-common/src/main/java/org/apache/hadoop/hbase/security/User.java
+index 733a658ad4..97d80ba20a 100644
+--- a/hbase-common/src/main/java/org/apache/hadoop/hbase/security/User.java
++++ b/hbase-common/src/main/java/org/apache/hadoop/hbase/security/User.java
+@@ -351,7 +351,8 @@ public abstract class User {
+     public static User createUserForTesting(Configuration conf,
+         String name, String[] groups) {
+       synchronized (UserProvider.class) {
+-        if (!(UserProvider.groups instanceof TestingGroups)) {
++        if (!(UserProvider.groups instanceof TestingGroups) ||
++            conf.getBoolean(TestingGroups.TEST_CONF, false)) {
+           UserProvider.groups = new TestingGroups(UserProvider.groups);
+         }
+       }
+@@ -400,11 +401,13 @@ public abstract class User {
+     }
+   }
+ 
+-  static class TestingGroups extends Groups {
++  public static class TestingGroups extends Groups {
++    public static final String TEST_CONF = "hbase.group.service.for.test.only";
++
+     private final Map<String, List<String>> userToGroupsMapping = new HashMap<>();
+     private Groups underlyingImplementation;
+ 
+-    TestingGroups(Groups underlyingImplementation) {
++    public TestingGroups(Groups underlyingImplementation) {
+       super(new Configuration());
+       this.underlyingImplementation = underlyingImplementation;
+     }
+diff --git a/hbase-common/src/main/java/org/apache/hadoop/hbase/security/UserProvider.java b/hbase-common/src/main/java/org/apache/hadoop/hbase/security/UserProvider.java
+index 17796ee56d..efa18fb9f5 100644
+--- a/hbase-common/src/main/java/org/apache/hadoop/hbase/security/UserProvider.java
++++ b/hbase-common/src/main/java/org/apache/hadoop/hbase/security/UserProvider.java
+@@ -32,6 +32,7 @@ import org.apache.hadoop.security.UserGroupInformation;
+ import org.apache.hadoop.util.ReflectionUtils;
+ import org.apache.yetus.audience.InterfaceAudience;
+ 
++import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+ import org.apache.hbase.thirdparty.com.google.common.cache.CacheBuilder;
+ import org.apache.hbase.thirdparty.com.google.common.cache.CacheLoader;
+ import org.apache.hbase.thirdparty.com.google.common.cache.LoadingCache;
+@@ -56,6 +57,15 @@ public class UserProvider extends BaseConfigurable {
+ 
+   static Groups groups = Groups.getUserToGroupsMappingService();
+ 
++  @VisibleForTesting
++  public static Groups getGroups() {
++    return groups;
++  }
++
++  public static void setGroups(Groups groups) {
++    UserProvider.groups = groups;
++  }
++
+   @Override
+   public void setConf(final Configuration conf) {
+     super.setConf(conf);
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessChecker.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessChecker.java
+index 986efd7105..e1178b3a8a 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessChecker.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessChecker.java
+@@ -28,12 +28,15 @@ import java.util.List;
+ import java.util.Map;
+ 
+ import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.hbase.AuthUtil;
+ import org.apache.hadoop.hbase.DoNotRetryIOException;
++import org.apache.hadoop.hbase.NamespaceDescriptor;
+ import org.apache.hadoop.hbase.TableName;
+ import org.apache.hadoop.hbase.client.RegionInfo;
+ import org.apache.hadoop.hbase.ipc.RpcServer;
+ import org.apache.hadoop.hbase.security.AccessDeniedException;
+ import org.apache.hadoop.hbase.security.User;
++import org.apache.hadoop.hbase.security.UserProvider;
+ import org.apache.hadoop.hbase.security.access.Permission.Action;
+ import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
+ import org.apache.hadoop.security.Groups;
+@@ -355,6 +358,40 @@ public final class AccessChecker {
+     }
+   }
+ 
++  /**
++   * Check if caller is granting or revoking superusers's or supergroups's permissions.
++   * @param request request name
++   * @param caller caller
++   * @param userToBeChecked target user or group
++   * @throws IOException AccessDeniedException if target user is superuser
++   */
++  public void performOnSuperuser(String request, User caller, String userToBeChecked)
++      throws IOException {
++    if (!authorizationEnabled) {
++      return;
++    }
++
++    List<String> userGroups = new ArrayList<>();
++    userGroups.add(userToBeChecked);
++    if (!AuthUtil.isGroupPrincipal(userToBeChecked)) {
++      for (String group : getUserGroups(userToBeChecked)) {
++        userGroups.add(AuthUtil.toGroupEntry(group));
++      }
++    }
++    for (String name : userGroups) {
++      if (authManager.checkSuperPrivileges(name)) {
++        AuthResult result = AuthResult.deny(
++          request,
++          "Granting or revoking superusers's or supergroups's permissions is not allowed",
++          caller,
++          Action.ADMIN,
++          NamespaceDescriptor.SYSTEM_NAMESPACE_NAME_STR);
++        logResult(result);
++        throw new AccessDeniedException(result.getReason());
++      }
++    }
++  }
++
+   public void checkLockPermissions(User user, String namespace,
+       TableName tableName, RegionInfo[] regionInfos, String reason)
+       throws IOException {
+@@ -466,7 +503,12 @@ public final class AccessChecker {
+    */
+   private void initGroupService(Configuration conf) {
+     if (groupService == null) {
+-      groupService = Groups.getUserToGroupsMappingService(conf);
++      if (conf.getBoolean(User.TestingGroups.TEST_CONF, false)) {
++        UserProvider.setGroups(new User.TestingGroups(UserProvider.getGroups()));
++        groupService = UserProvider.getGroups();
++      } else {
++        groupService = Groups.getUserToGroupsMappingService(conf);
++      }
+     }
+   }
+ 
+@@ -480,7 +522,7 @@ public final class AccessChecker {
+       return groupService.getGroups(user);
+     } catch (IOException e) {
+       LOG.error("Error occured while retrieving group for " + user, e);
+-      return new ArrayList<String>();
++      return new ArrayList<>();
+     }
+   }
+ }
+\ No newline at end of file
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessController.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessController.java
+index dcf44b84fa..6f30e769e2 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessController.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessController.java
+@@ -2672,5 +2672,6 @@ public class AccessController implements MasterCoprocessor, RegionCoprocessor,
+         break;
+       default:
+     }
++    accessChecker.performOnSuperuser(request, caller, userPermission.getUser());
+   }
+ }
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AuthManager.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AuthManager.java
+index 8da9a827b5..fea6c9ca52 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AuthManager.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AuthManager.java
+@@ -36,7 +36,6 @@ import org.apache.hadoop.hbase.exceptions.DeserializationException;
+ import org.apache.hadoop.hbase.log.HBaseMarkers;
+ import org.apache.hadoop.hbase.security.Superusers;
+ import org.apache.hadoop.hbase.security.User;
+-import org.apache.hadoop.hbase.security.UserProvider;
+ import org.apache.hadoop.hbase.util.Bytes;
+ import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
+ import org.apache.yetus.audience.InterfaceAudience;
+@@ -46,7 +45,6 @@ import org.slf4j.LoggerFactory;
+ 
+ import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+ import org.apache.hbase.thirdparty.com.google.common.collect.ListMultimap;
+-import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
+ 
+ /**
+  * Performs authorization checks for a given user's assigned permissions.
+@@ -101,11 +99,13 @@ public final class AuthManager implements Closeable {
+   PermissionCache<NamespacePermission> NS_NO_PERMISSION = new PermissionCache<>();
+   PermissionCache<TablePermission> TBL_NO_PERMISSION = new PermissionCache<>();
+ 
++  /** Names of superusers and supergroups. */
++  private Set<String> superUsersGroups = new HashSet<>();
+   /**
+-   * Cache for global permission.
+-   * Since every user/group can only have one global permission, no need to user PermissionCache.
++   * Cache for global permission excluding superuser and supergroup.
++   * Since every user/group can only have one global permission, no need to use PermissionCache.
+    */
+-  private volatile Map<String, GlobalPermission> globalCache;
++  private Map<String, GlobalPermission> globalCache = new ConcurrentHashMap<>();
+   /** Cache for namespace permission. */
+   private ConcurrentHashMap<String, PermissionCache<NamespacePermission>> namespaceCache =
+     new ConcurrentHashMap<>();
+@@ -122,8 +122,8 @@ public final class AuthManager implements Closeable {
+   private AuthManager(ZKWatcher watcher, Configuration conf)
+       throws IOException {
+     this.conf = conf;
+-    // initialize global permissions based on configuration
+-    globalCache = initGlobal(conf);
++    // initialize superusers's and supergroup's permissions.
++    initSuperPrivileges();
+ 
+     this.zkperms = new ZKPermissionWatcher(watcher, this, conf);
+     try {
+@@ -139,27 +139,18 @@ public final class AuthManager implements Closeable {
+   }
+ 
+   /**
+-   * Initialize with global permission assignments
++   * Initialize super privileges
+    * from the {@code hbase.superuser} configuration key.
+    */
+-  private Map<String, GlobalPermission> initGlobal(Configuration conf) throws IOException {
+-    UserProvider userProvider = UserProvider.instantiate(conf);
+-    User user = userProvider.getCurrent();
++  private void initSuperPrivileges() throws IOException {
++    User user = Superusers.getSystemUser();
+     if (user == null) {
+       throw new IOException("Unable to obtain the current user, " +
+         "authorization checks for internal operations will not work correctly!");
+     }
+-    String currentUser = user.getShortName();
+-
+-    Map<String, GlobalPermission> global = new HashMap<>();
+-    // the system user is always included
+-    List<String> superusers = Lists.asList(currentUser, conf.getStrings(
+-        Superusers.SUPERUSER_CONF_KEY, new String[0]));
+-    for (String name : superusers) {
+-      GlobalPermission globalPermission = new GlobalPermission(Permission.Action.values());
+-      global.put(name, globalPermission);
+-    }
+-    return global;
++    superUsersGroups.add(user.getShortName());
++    superUsersGroups.addAll(Superusers.getSuperUsers());
++    superUsersGroups.addAll(Superusers.getSuperGroups());
+   }
+ 
+   public ZKPermissionWatcher getZKPermissionWatcher() {
+@@ -219,19 +210,13 @@ public final class AuthManager implements Closeable {
+    * @param globalPerms new global permissions
+    */
+   private void updateGlobalCache(ListMultimap<String, Permission> globalPerms) {
+-    try {
+-      Map<String, GlobalPermission> global = initGlobal(conf);
+-      for (String name : globalPerms.keySet()) {
+-        for (Permission permission : globalPerms.get(name)) {
+-          global.put(name, (GlobalPermission) permission);
+-        }
++    globalCache.clear();
++    for (String name : globalPerms.keySet()) {
++      for (Permission permission : globalPerms.get(name)) {
++        globalCache.put(name, (GlobalPermission) permission);
+       }
+-      globalCache = global;
+-      mtime.incrementAndGet();
+-    } catch (Exception e) {
+-      // Never happens
+-      LOG.error("Error occurred while updating the global cache", e);
+     }
++    mtime.incrementAndGet();
+   }
+ 
+   /**
+@@ -287,6 +272,9 @@ public final class AuthManager implements Closeable {
+     if (user == null) {
+       return false;
+     }
++    if (Superusers.isSuperUser(user)) {
++      return true;
++    }
+     if (authorizeGlobal(globalCache.get(user.getShortName()), action)) {
+       return true;
+     }
+@@ -506,8 +494,8 @@ public final class AuthManager implements Closeable {
+     try {
+       List<Permission> perms = AccessControlLists.getCellPermissionsForUser(user, cell);
+       if (LOG.isTraceEnabled()) {
+-        LOG.trace("Perms for user " + user.getShortName() + " in cell " + cell + ": " +
+-          (perms != null ? perms : ""));
++        LOG.trace("Perms for user {} in table {} in cell {}: {}",
++          user.getShortName(), table, cell, (perms != null ? perms : ""));
+       }
+       if (perms != null) {
+         for (Permission p: perms) {
+@@ -525,6 +513,15 @@ public final class AuthManager implements Closeable {
+     return false;
+   }
+ 
++  /**
++   * Check if given user or group is superuser or supergroup.
++   * @param user name of user or group
++   * @return true if it is, false otherwise
++   */
++  public boolean checkSuperPrivileges(String user) {
++    return superUsersGroups.contains(user);
++  }
++
+   /**
+    * Remove given namespace from AuthManager's namespace cache.
+    * @param ns namespace
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/SecureTestUtil.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/SecureTestUtil.java
+index e392b3b7e9..b3d08c5b54 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/SecureTestUtil.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/SecureTestUtil.java
+@@ -93,7 +93,11 @@ public class SecureTestUtil {
+       sb.append(',');
+       sb.append(currentUser); sb.append(".hfs."); sb.append(i);
+     }
++    // Add a supergroup for improving test coverage.
++    sb.append(',').append("@supergroup");
+     conf.set("hbase.superuser", sb.toString());
++    // hbase.group.service.for.test.only is used in test only.
++    conf.set(User.TestingGroups.TEST_CONF, "true");
+   }
+ 
+   public static void enableSecurity(Configuration conf) throws IOException {
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestRpcAccessChecks.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestRpcAccessChecks.java
+index 5aa9ed66ac..378e3de899 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestRpcAccessChecks.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestRpcAccessChecks.java
+@@ -1,4 +1,3 @@
+-
+ /**
+  * Licensed to the Apache Software Foundation (ASF) under one
+  * or more contributor license agreements.  See the NOTICE file
+@@ -16,6 +15,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
++
+ package org.apache.hadoop.hbase.security.access;
+ 
+ import static org.apache.hadoop.hbase.AuthUtil.toGroupEntry;
+@@ -32,6 +32,7 @@ import java.security.PrivilegedExceptionAction;
+ import java.util.Collections;
+ import java.util.HashMap;
+ import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.hbase.AuthUtil;
+ import org.apache.hadoop.hbase.Cell;
+ import org.apache.hadoop.hbase.CellUtil;
+ import org.apache.hadoop.hbase.HBaseClassTestRule;
+@@ -103,6 +104,8 @@ public class TestRpcAccessChecks {
+   private static User USER_ADMIN;
+   // user without admin permissions
+   private static User USER_NON_ADMIN;
++  // user in supergroup
++  private static User USER_IN_SUPERGROUPS;
+ 
+   private static final String GROUP_ADMIN = "admin_group";
+   private static User USER_GROUP_ADMIN;
+@@ -135,23 +138,22 @@ public class TestRpcAccessChecks {
+ 
+     // Enable security
+     enableSecurity(conf);
+-    TEST_UTIL.startMiniCluster();
+-
+-    // Wait for the ACL table to become available
+-    TEST_UTIL.waitUntilAllRegionsAssigned(AccessControlLists.ACL_TABLE_NAME);
+ 
+     // Create users
+     USER_ADMIN = User.createUserForTesting(conf, "admin", new String[0]);
+     USER_NON_ADMIN = User.createUserForTesting(conf, "non_admin", new String[0]);
+     USER_GROUP_ADMIN =
+         User.createUserForTesting(conf, "user_group_admin", new String[] { GROUP_ADMIN });
++    USER_IN_SUPERGROUPS =
++        User.createUserForTesting(conf, "user_in_supergroup", new String[] { "supergroup" });
+ 
+-    // Assign permissions to users and groups
+-    SecureTestUtil.grantGlobal(TEST_UTIL, USER_ADMIN.getShortName(),
+-      Permission.Action.ADMIN, Permission.Action.CREATE);
++    TEST_UTIL.startMiniCluster();
++    // Wait for the ACL table to become available
++    TEST_UTIL.waitUntilAllRegionsAssigned(AccessControlLists.ACL_TABLE_NAME);
++
++    // Assign permissions to groups
+     SecureTestUtil.grantGlobal(TEST_UTIL, toGroupEntry(GROUP_ADMIN),
+       Permission.Action.ADMIN, Permission.Action.CREATE);
+-    // No permissions to USER_NON_ADMIN
+   }
+ 
+   interface Action {
+@@ -361,4 +363,76 @@ public class TestRpcAccessChecks {
+     };
+     verifyAllowed(USER_NON_ADMIN, userAction);
+   }
++
++  @Test
++  public void testGrantDeniedOnSuperUsersGroups() {
++    /** User */
++    try {
++      // Global
++      SecureTestUtil.grantGlobal(TEST_UTIL, USER_ADMIN.getShortName(),
++        Permission.Action.ADMIN, Permission.Action.CREATE);
++      fail("Granting superuser's global permissions is not allowed.");
++    } catch (Exception e) {
++    }
++    try {
++      // Namespace
++      SecureTestUtil.grantOnNamespace(TEST_UTIL, USER_ADMIN.getShortName(),
++        TEST_NAME.getMethodName(),
++        Permission.Action.ADMIN, Permission.Action.CREATE);
++      fail("Granting superuser's namespace permissions is not allowed.");
++    } catch (Exception e) {
++    }
++    try {
++      // Table
++      SecureTestUtil.grantOnTable(TEST_UTIL, USER_ADMIN.getName(),
++        TableName.valueOf(TEST_NAME.getMethodName()), null, null,
++        Permission.Action.ADMIN, Permission.Action.CREATE);
++      fail("Granting superuser's table permissions is not allowed.");
++    } catch (Exception e) {
++    }
++
++    /** Group */
++    try {
++      SecureTestUtil.grantGlobal(TEST_UTIL, USER_IN_SUPERGROUPS.getShortName(),
++        Permission.Action.ADMIN, Permission.Action.CREATE);
++      fail("Granting superuser's global permissions is not allowed.");
++    } catch (Exception e) {
++    }
++  }
++
++  @Test
++  public void testRevokeDeniedOnSuperUsersGroups() {
++    /** User */
++    try {
++      // Global
++      SecureTestUtil.revokeGlobal(TEST_UTIL, USER_ADMIN.getShortName(),
++        Permission.Action.ADMIN);
++      fail("Revoking superuser's global permissions is not allowed.");
++    } catch (Exception e) {
++    }
++    try {
++      // Namespace
++      SecureTestUtil.revokeFromNamespace(TEST_UTIL, USER_ADMIN.getShortName(),
++        TEST_NAME.getMethodName(), Permission.Action.ADMIN);
++      fail("Revoking superuser's namespace permissions is not allowed.");
++    } catch (Exception e) {
++    }
++    try {
++      // Table
++      SecureTestUtil.revokeFromTable(TEST_UTIL, USER_ADMIN.getName(),
++        TableName.valueOf(TEST_NAME.getMethodName()), null, null,
++        Permission.Action.ADMIN);
++      fail("Revoking superuser's table permissions is not allowed.");
++    } catch (Exception e) {
++    }
++
++    /** Group */
++    try {
++      // Global revoke
++      SecureTestUtil.revokeGlobal(TEST_UTIL, AuthUtil.toGroupEntry("supergroup"),
++        Permission.Action.ADMIN, Permission.Action.CREATE);
++      fail("Revoking supergroup's permissions is not allowed.");
++    } catch (Exception e) {
++    }
++  }
+ }
+-- 
+2.15.0
+

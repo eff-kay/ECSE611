@@ -1,0 +1,215 @@
+From fb76e0ee447e14aae4d1c156f9c86fd455e27eae Mon Sep 17 00:00:00 2001
+From: huzheng <openinx@gmail.com>
+Date: Mon, 18 Feb 2019 17:12:23 +0800
+Subject: [PATCH] HBASE-21917 Make the HFileBlock#validateChecksum can accept
+ ByteBuff as an input.
+
+---
+ .../apache/hadoop/hbase/io/hfile/ChecksumUtil.java | 110 +++++++++++----------
+ .../apache/hadoop/hbase/io/hfile/HFileBlock.java   |  13 ++-
+ 2 files changed, 65 insertions(+), 58 deletions(-)
+
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/io/hfile/ChecksumUtil.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/io/hfile/ChecksumUtil.java
+index 5eb1826..680e223 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/io/hfile/ChecksumUtil.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/io/hfile/ChecksumUtil.java
+@@ -17,11 +17,11 @@
+  */
+ package org.apache.hadoop.hbase.io.hfile;
+ 
+-import java.io.ByteArrayOutputStream;
+ import java.io.IOException;
+ import java.nio.ByteBuffer;
+ 
+ import org.apache.hadoop.fs.ChecksumException;
++import org.apache.hadoop.hbase.nio.ByteBuff;
+ import org.apache.yetus.audience.InterfaceAudience;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+@@ -35,8 +35,7 @@ import org.apache.hadoop.util.DataChecksum;
+ public class ChecksumUtil {
+   public static final Logger LOG = LoggerFactory.getLogger(ChecksumUtil.class);
+ 
+-  /** This is used to reserve space in a byte buffer */
+-  private static byte[] DUMMY_VALUE = new byte[128 * HFileBlock.CHECKSUM_SIZE];
++  public static final int CHECKSUM_BUF_SIZE = 256;
+ 
+   /**
+    * This is used by unit tests to make checksum failures throw an
+@@ -77,51 +76,79 @@ public class ChecksumUtil {
+        ByteBuffer.wrap(outdata, outOffset, outdata.length - outOffset));
+   }
+ 
++  private static boolean verifyChunkedSums(DataChecksum dataChecksum, ByteBuff data,
++      ByteBuff checksums, String pathName, long basePos) throws ChecksumException {
++    int checksumTypeSize = dataChecksum.getChecksumType().size;
++    if (checksumTypeSize == 0) return true;
++    assert checksumTypeSize == 4;
++
++    int bytesPerChecksum = dataChecksum.getBytesPerChecksum();
++    int startDataPos = data.position();
++    data.mark();
++    checksums.mark();
++    try {
++      // allocate an small buffer for reducing young GC (HBASE-21917)
++      byte[] buf = new byte[CHECKSUM_BUF_SIZE];
++      byte[] sum = new byte[checksumTypeSize];
++      while (data.remaining() > 0) {
++        int n = Math.min(data.remaining(), bytesPerChecksum);
++        checksums.get(sum);
++        dataChecksum.reset();
++        for (int remain = n, len; remain > 0; remain -= len) {
++          len = Math.min(CHECKSUM_BUF_SIZE, remain);
++          data.get(buf, 0, len);
++          dataChecksum.update(buf, 0, len);
++        }
++        int calculated = (int) dataChecksum.getValue();
++        int stored = (sum[0] << 24 & 0xff000000) | (sum[1] << 16 & 0xff0000)
++            | (sum[2] << 8 & 0xff00) | sum[3] & 0xff;
++        if (calculated != stored) {
++          if (LOG.isTraceEnabled()) {
++            long errPos = basePos + data.position() - startDataPos - n;
++            LOG.trace("Checksum error: {} at {} expected: {} got: {}", pathName, errPos, stored,
++              calculated);
++          }
++          return false;
++        }
++      }
++    } finally {
++      data.reset();
++      checksums.reset();
++    }
++    return true;
++  }
++
+   /**
+    * Validates that the data in the specified HFileBlock matches the checksum. Generates the
+    * checksums for the data and then validate that it matches those stored in the end of the data.
+-   * @param buffer Contains the data in following order: HFileBlock header, data, checksums.
++   * @param buf Contains the data in following order: HFileBlock header, data, checksums.
+    * @param pathName Path of the HFile to which the {@code data} belongs. Only used for logging.
+    * @param offset offset of the data being validated. Only used for logging.
+    * @param hdrSize Size of the block header in {@code data}. Only used for logging.
+    * @return True if checksum matches, else false.
+    */
+-  static boolean validateChecksum(ByteBuffer buffer, String pathName, long offset, int hdrSize)
++  static boolean validateChecksum(ByteBuff buf, String pathName, long offset, int hdrSize)
+       throws IOException {
+-    // A ChecksumType.NULL indicates that the caller is not interested in validating checksums,
+-    // so we always return true.
+-    ChecksumType cktype =
+-        ChecksumType.codeToType(buffer.get(HFileBlock.Header.CHECKSUM_TYPE_INDEX));
+-    if (cktype == ChecksumType.NULL) {
+-      return true; // No checksum validations needed for this block.
++    ChecksumType ctype = ChecksumType.codeToType(buf.get(HFileBlock.Header.CHECKSUM_TYPE_INDEX));
++    if (ctype == ChecksumType.NULL) {
++      return true;// No checksum validations needed for this block.
+     }
+ 
+     // read in the stored value of the checksum size from the header.
+-    int bytesPerChecksum = buffer.getInt(HFileBlock.Header.BYTES_PER_CHECKSUM_INDEX);
+-
+-    DataChecksum dataChecksum = DataChecksum.newDataChecksum(
+-        cktype.getDataChecksumType(), bytesPerChecksum);
++    int bytesPerChecksum = buf.getInt(HFileBlock.Header.BYTES_PER_CHECKSUM_INDEX);
++    DataChecksum dataChecksum =
++        DataChecksum.newDataChecksum(ctype.getDataChecksumType(), bytesPerChecksum);
+     assert dataChecksum != null;
+     int onDiskDataSizeWithHeader =
+-        buffer.getInt(HFileBlock.Header.ON_DISK_DATA_SIZE_WITH_HEADER_INDEX);
++        buf.getInt(HFileBlock.Header.ON_DISK_DATA_SIZE_WITH_HEADER_INDEX);
+     if (LOG.isTraceEnabled()) {
+-      LOG.info("dataLength=" + buffer.capacity()
+-          + ", sizeWithHeader=" + onDiskDataSizeWithHeader
+-          + ", checksumType=" + cktype.getName()
+-          + ", file=" + pathName
+-          + ", offset=" + offset
+-          + ", headerSize=" + hdrSize
+-          + ", bytesPerChecksum=" + bytesPerChecksum);
++      LOG.info("dataLength=" + buf.capacity() + ", sizeWithHeader=" + onDiskDataSizeWithHeader
++          + ", checksumType=" + ctype.getName() + ", file=" + pathName + ", offset=" + offset
++          + ", headerSize=" + hdrSize + ", bytesPerChecksum=" + bytesPerChecksum);
+     }
+-    try {
+-      ByteBuffer data = (ByteBuffer) buffer.duplicate().position(0).limit(onDiskDataSizeWithHeader);
+-      ByteBuffer checksums = (ByteBuffer) buffer.duplicate().position(onDiskDataSizeWithHeader)
+-          .limit(buffer.capacity());
+-      dataChecksum.verifyChunkedSums(data, checksums, pathName, 0);
+-    } catch (ChecksumException e) {
+-      return false;
+-    }
+-    return true;  // checksum is valid
++    ByteBuff data = buf.duplicate().position(0).limit(onDiskDataSizeWithHeader);
++    ByteBuff checksums = buf.duplicate().position(onDiskDataSizeWithHeader).limit(buf.capacity());
++    return verifyChunkedSums(dataChecksum, data, checksums, pathName, 0);
+   }
+ 
+   /**
+@@ -151,25 +178,6 @@ public class ChecksumUtil {
+   }
+ 
+   /**
+-   * Write dummy checksums to the end of the specified bytes array
+-   * to reserve space for writing checksums later
+-   * @param baos OutputStream to write dummy checkum values
+-   * @param numBytes Number of bytes of data for which dummy checksums
+-   *                 need to be generated
+-   * @param bytesPerChecksum Number of bytes per checksum value
+-   */
+-  static void reserveSpaceForChecksums(ByteArrayOutputStream baos,
+-    int numBytes, int bytesPerChecksum) throws IOException {
+-    long numChunks = numChunks(numBytes, bytesPerChecksum);
+-    long bytesLeft = numChunks * HFileBlock.CHECKSUM_SIZE;
+-    while (bytesLeft > 0) {
+-      long count = Math.min(bytesLeft, DUMMY_VALUE.length);
+-      baos.write(DUMMY_VALUE, 0, (int)count);
+-      bytesLeft -= count;
+-    }
+-  }
+-
+-  /**
+    * Mechanism to throw an exception in case of hbase checksum
+    * failure. This is used by unit tests only.
+    * @param value Setting this to true will cause hbase checksum
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/io/hfile/HFileBlock.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/io/hfile/HFileBlock.java
+index 968a87e..2be1c56 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/io/hfile/HFileBlock.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/io/hfile/HFileBlock.java
+@@ -1784,10 +1784,10 @@ public class HFileBlock implements Cacheable {
+       // Do a few checks before we go instantiate HFileBlock.
+       assert onDiskSizeWithHeader > this.hdrSize;
+       verifyOnDiskSizeMatchesHeader(onDiskSizeWithHeader, headerBuf, offset, checksumSupport);
+-      ByteBuffer onDiskBlockByteBuffer = ByteBuffer.wrap(onDiskBlock, 0, onDiskSizeWithHeader);
++      ByteBuff onDiskBlockByteBuff =
++          new SingleByteBuff(ByteBuffer.wrap(onDiskBlock, 0, onDiskSizeWithHeader));
+       // Verify checksum of the data before using it for building HFileBlock.
+-      if (verifyChecksum &&
+-          !validateChecksum(offset, onDiskBlockByteBuffer, hdrSize)) {
++      if (verifyChecksum && !validateChecksum(offset, onDiskBlockByteBuff, hdrSize)) {
+         return null;
+       }
+       long duration = System.currentTimeMillis() - startTime;
+@@ -1797,9 +1797,8 @@ public class HFileBlock implements Cacheable {
+       // The onDiskBlock will become the headerAndDataBuffer for this block.
+       // If nextBlockOnDiskSizeWithHeader is not zero, the onDiskBlock already
+       // contains the header of next block, so no need to set next block's header in it.
+-      HFileBlock hFileBlock =
+-          new HFileBlock(new SingleByteBuff(onDiskBlockByteBuffer), checksumSupport,
+-              MemoryType.EXCLUSIVE, offset, nextBlockOnDiskSize, fileContext);
++      HFileBlock hFileBlock = new HFileBlock(onDiskBlockByteBuff, checksumSupport,
++          MemoryType.EXCLUSIVE, offset, nextBlockOnDiskSize, fileContext);
+       // Run check on uncompressed sizings.
+       if (!fileContext.isCompressedOrEncrypted()) {
+         hFileBlock.sanityCheckUncompressed();
+@@ -1838,7 +1837,7 @@ public class HFileBlock implements Cacheable {
+      * If the block doesn't uses checksum, returns false.
+      * @return True if checksum matches, else false.
+      */
+-    private boolean validateChecksum(long offset, ByteBuffer data, int hdrSize)
++    private boolean validateChecksum(long offset, ByteBuff data, int hdrSize)
+         throws IOException {
+       // If this is an older version of the block that does not have checksums, then return false
+       // indicating that checksum verification did not succeed. Actually, this method should never
+-- 
+2.7.4
+

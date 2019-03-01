@@ -1,0 +1,105 @@
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/TestPartialResultsFromClientSide.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/TestPartialResultsFromClientSide.java
+index a6f8373..b348de4 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/TestPartialResultsFromClientSide.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/TestPartialResultsFromClientSide.java
+@@ -17,6 +17,7 @@
+  */
+ package org.apache.hadoop.hbase;
+ 
++import static org.junit.Assert.assertArrayEquals;
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertFalse;
+ import static org.junit.Assert.assertTrue;
+@@ -40,6 +41,7 @@ import org.apache.hadoop.hbase.client.Table;
+ import org.apache.hadoop.hbase.filter.ColumnPrefixFilter;
+ import org.apache.hadoop.hbase.filter.ColumnRangeFilter;
+ import org.apache.hadoop.hbase.filter.Filter;
++import org.apache.hadoop.hbase.filter.FilterBase;
+ import org.apache.hadoop.hbase.filter.FirstKeyOnlyFilter;
+ import org.apache.hadoop.hbase.filter.FirstKeyValueMatchingQualifiersFilter;
+ import org.apache.hadoop.hbase.filter.RandomRowFilter;
+@@ -829,4 +831,83 @@ public class TestPartialResultsFromClientSide {
+       testEquivalenceOfScanResults(TABLE, partialScan, oneshotScan);
+     }
+   }
++
++
++  public static class EssentialFilter extends FilterBase {
++
++    @Override
++    public ReturnCode filterKeyValue(Cell v) throws IOException {
++      return ReturnCode.INCLUDE;
++    }
++
++    public boolean isFamilyEssential(byte[] cf){
++      return Bytes.equals(cf,FAMILIES[1]);
++    }
++
++    public static Filter parseFrom(final byte [] pbBytes){
++      return new EssentialFilter();
++    }
++
++  }
++
++  private void assertCell(Cell cell, byte[] row, byte[] cf, byte[] cq) {
++    try {
++      assertArrayEquals(row, Bytes.copy(cell.getRowArray(), cell.getRowOffset(), cell.getRowLength()));
++      assertArrayEquals(cf, Bytes.copy(cell.getFamilyArray(), cell.getFamilyOffset(), cell.getFamilyLength()));
++      assertArrayEquals(cq,
++          Bytes.copy(cell.getQualifierArray(), cell.getQualifierOffset(), cell.getQualifierLength()));
++    } catch (AssertionError e) {
++      throw new AssertionError(
++          "expected " + Bytes.toString(row) + "/" + Bytes.toString(cf) + ":" + Bytes.toString(cq)
++              + " but was:" + cell.toString());
++    }
++  }
++
++  @Test
++  public void testEssentialHeapOrderForCompleteRow() throws IOException {
++    Table table =
++        createTestTable(TableName.valueOf("testEssentialHeapOrderForCompleteRow"), ROWS, FAMILIES,
++            QUALIFIERS, VALUE);
++    Scan scan = new Scan();
++    scan.setFilter(new EssentialFilter());
++    scan.setMaxResultSize(1);
++    ResultScanner scanner = table.getScanner(scan);
++    for (int i = 0; i < NUM_ROWS; i++) {
++      Result result = scanner.next();
++      assertFalse(result.isPartial());
++      Cell[] row = result.rawCells();
++      assertEquals(NUM_FAMILIES * NUM_QUALIFIERS, row.length);
++      for (int j = 0; j < NUM_FAMILIES; j++) {
++        for (int k = 0; k < NUM_QUALIFIERS; k++) {
++          assertCell(row[j * NUM_FAMILIES + k], ROWS[i], FAMILIES[j], QUALIFIERS[k]);
++        }
++      }
++    }
++    assertTrue(scanner.next() == null);
++  }
++
++  @Test
++  public void testEssentialHeapOrderForPartialRow() throws IOException {
++    Table table =
++        createTestTable(TableName.valueOf("testEssentialHeapOrderForPartialRow"), ROWS, FAMILIES,
++            QUALIFIERS, VALUE);
++    Scan scan = new Scan();
++    scan.setFilter(new EssentialFilter());
++    scan.setMaxResultSize(1);
++    scan.setAllowPartialResults(true);
++    ResultScanner scanner = table.getScanner(scan);
++    for (int i = 0; i < NUM_ROWS; i++) {
++      for (int j = 0; j < NUM_FAMILIES; j++) {
++        for (int k = 0; k < NUM_QUALIFIERS; k++) {
++          Result result = scanner.next();
++          assertFalse(result == null);
++          Cell[] row = result.rawCells();
++          assertEquals(1, row.length);
++          assertCell(row[0], ROWS[i], FAMILIES[j], QUALIFIERS[k]);
++        }
++      }
++    }
++    assertTrue(scanner.next() == null);
++  }
++
+ }
+\ No newline at end of file

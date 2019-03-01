@@ -1,0 +1,138 @@
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterBase.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterBase.java
+index 7401e4c..41e4472 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterBase.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterBase.java
+@@ -24,6 +24,7 @@ import java.util.ArrayList;
+ import java.util.List;
+ 
+ import org.apache.hadoop.hbase.Cell;
++import org.apache.hadoop.hbase.filter.FilterList.FilterListType;
+ import org.apache.yetus.audience.InterfaceAudience;
+ 
+ /**
+@@ -36,6 +37,7 @@ import org.apache.yetus.audience.InterfaceAudience;
+  */
+ @InterfaceAudience.Private // TODO add filter limited private level
+ public abstract class FilterBase extends Filter {
++  FilterListType type = FilterListType.NONE;
+ 
+   /**
+    * Filters that are purely stateless and do nothing in their reset() methods can inherit
+@@ -181,4 +183,13 @@ public abstract class FilterBase extends Filter {
+   boolean areSerializedFieldsEqual(Filter other) {
+     return true;
+   }
++
++  FilterBase setFilterListType(FilterListType type) {
++    this.type = type;
++    return this;
++  }
++
++  FilterListType getFilterListType() {
++    return type;
++  }
+ }
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterList.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterList.java
+index c549eab..84ddc68 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterList.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterList.java
+@@ -45,6 +45,14 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.FilterProtos;
+ @InterfaceAudience.Public
+ final public class FilterList extends FilterBase {
+ 
++  @InterfaceAudience.Public
++  public enum FilterListType {
++    NONE,
++    /** !AND */
++    MUST_PASS_ALL,
++    /** !OR */
++    MUST_PASS_ONE
++  }
+   /** set operator */
+   @InterfaceAudience.Public
+   public enum Operator {
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListBase.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListBase.java
+index d6bb75c..11fc334 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListBase.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListBase.java
+@@ -26,6 +26,7 @@ import java.util.List;
+ 
+ import org.apache.hadoop.hbase.Cell;
+ import org.apache.hadoop.hbase.CellComparator;
++import org.apache.hadoop.hbase.filter.FilterList.FilterListType;
+ import org.apache.yetus.audience.InterfaceAudience;
+ 
+ /**
+@@ -48,6 +49,16 @@ public abstract class FilterListBase extends FilterBase {
+     this.filters = new ArrayList<>(filters);
+   }
+ 
++  FilterBase setFilterListType(FilterListType type) {
++    for (Filter filter : filters) {
++      if (filter instanceof FilterBase) {
++        FilterBase fb = (FilterBase) filter;
++        fb.setFilterListType(type);
++      }
++    }
++    return this;
++  }
++
+   protected static boolean isInReturnCodes(ReturnCode testRC, ReturnCode... returnCodes) {
+     return Arrays.stream(returnCodes).anyMatch(testRC::equals);
+   }
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListWithAND.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListWithAND.java
+index 9f2ca21..da9c23a 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListWithAND.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListWithAND.java
+@@ -20,6 +20,7 @@
+ package org.apache.hadoop.hbase.filter;
+ 
+ import org.apache.hadoop.hbase.Cell;
++import org.apache.hadoop.hbase.filter.FilterList.FilterListType;
+ import org.apache.yetus.audience.InterfaceAudience;
+ 
+ import java.io.IOException;
+@@ -42,6 +43,7 @@ public class FilterListWithAND extends FilterListBase {
+     // sub-filters (because all sub-filters return INCLUDE*). So here, fill this array with true. we
+     // keep this in FilterListWithAND for abstracting the transformCell() in FilterListBase.
+     subFiltersIncludedCell = new ArrayList<>(Collections.nCopies(filters.size(), true));
++    setFilterListType(FilterListType.MUST_PASS_ALL);
+   }
+ 
+   @Override
+@@ -50,6 +52,7 @@ public class FilterListWithAND extends FilterListBase {
+       throw new IllegalArgumentException("Filters in the list must have the same reversed flag");
+     }
+     this.filters.addAll(filters);
++    setFilterListType(FilterListType.MUST_PASS_ALL);
+     this.subFiltersIncludedCell.addAll(Collections.nCopies(filters.size(), true));
+   }
+ 
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListWithOR.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListWithOR.java
+index 064dd83..20a7b65 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListWithOR.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListWithOR.java
+@@ -22,6 +22,7 @@ package org.apache.hadoop.hbase.filter;
+ import org.apache.hadoop.hbase.Cell;
+ import org.apache.hadoop.hbase.CellUtil;
+ import org.apache.hadoop.hbase.KeyValueUtil;
++import org.apache.hadoop.hbase.filter.FilterList.FilterListType;
+ import org.apache.yetus.audience.InterfaceAudience;
+ 
+ import java.io.IOException;
+@@ -49,6 +50,7 @@ public class FilterListWithOR extends FilterListBase {
+     prevFilterRCList = new ArrayList<>(Collections.nCopies(filters.size(), null));
+     prevCellList = new ArrayList<>(Collections.nCopies(filters.size(), null));
+     subFiltersIncludedCell = new ArrayList<>(Collections.nCopies(filters.size(), false));
++    setFilterListType(FilterListType.MUST_PASS_ONE);
+   }
+ 
+   @Override
+@@ -60,6 +62,7 @@ public class FilterListWithOR extends FilterListBase {
+     this.subFiltersIncludedCell.addAll(Collections.nCopies(filters.size(), false));
+     this.prevFilterRCList.addAll(Collections.nCopies(filters.size(), null));
+     this.prevCellList.addAll(Collections.nCopies(filters.size(), null));
++    setFilterListType(FilterListType.MUST_PASS_ONE);
+   }
+ 
+   @Override

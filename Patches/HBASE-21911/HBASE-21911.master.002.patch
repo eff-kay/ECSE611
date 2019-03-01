@@ -1,0 +1,2574 @@
+From 3f3f0466ab5f08a323f5d0c139c1303fae1cbb21 Mon Sep 17 00:00:00 2001
+From: meiyi <myimeiyi@gamil.com>
+Date: Mon, 18 Feb 2019 15:43:31 +0800
+Subject: [PATCH] HBASE-21911 Move
+ getUserPermissions/hasPermission/checkPermissions from regionserver to master
+
+---
+ .../java/org/apache/hadoop/hbase/client/Admin.java |  26 ++
+ .../org/apache/hadoop/hbase/client/AsyncAdmin.java |  23 ++
+ .../hadoop/hbase/client/AsyncHBaseAdmin.java       |  18 +
+ .../hbase/client/ConnectionImplementation.java     |  24 ++
+ .../org/apache/hadoop/hbase/client/HBaseAdmin.java |  46 +++
+ .../hadoop/hbase/client/RawAsyncHBaseAdmin.java    |  41 +++
+ .../hbase/client/ShortCircuitMasterConnection.java |  24 ++
+ .../hbase/security/access/AccessControlClient.java |  84 ++---
+ .../hbase/security/access/AccessControlUtil.java   |  14 +
+ .../security/access/ShadedAccessControlUtil.java   | 108 ++++++
+ .../src/main/protobuf/AccessControl.proto          |  12 +
+ .../src/main/protobuf/Master.proto                 |   6 +
+ .../hadoop/hbase/coprocessor/MasterObserver.java   |  58 ++++
+ .../hadoop/hbase/master/MasterCoprocessorHost.java |  56 +++
+ .../hadoop/hbase/master/MasterRpcServices.java     | 145 ++++++++
+ .../hbase/security/access/AccessChecker.java       | 106 ++++++
+ .../hbase/security/access/AccessControlLists.java  |  13 +-
+ .../hbase/security/access/AccessController.java    | 378 ++++++++-------------
+ .../client/TestAsyncAccessControlAdminApi.java     |  86 +++++
+ .../hbase/security/access/SecureTestUtil.java      |  97 ++----
+ .../security/access/TestAccessController.java      | 344 +++++++++++++------
+ .../security/access/TestNamespaceCommands.java     |   9 +-
+ .../access/TestWithDisabledAuthorization.java      |  18 +-
+ .../hadoop/hbase/thrift2/client/ThriftAdmin.java   |  17 +
+ 24 files changed, 1258 insertions(+), 495 deletions(-)
+ create mode 100644 hbase-server/src/test/java/org/apache/hadoop/hbase/client/TestAsyncAccessControlAdminApi.java
+
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/client/Admin.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/client/Admin.java
+index f80a460..99ff097 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/client/Admin.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/client/Admin.java
+@@ -53,6 +53,8 @@ import org.apache.hadoop.hbase.replication.ReplicationException;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerDescription;
+ import org.apache.hadoop.hbase.replication.SyncReplicationState;
++import org.apache.hadoop.hbase.security.access.Permission;
++import org.apache.hadoop.hbase.security.access.TablePermission;
+ import org.apache.hadoop.hbase.security.access.UserPermission;
+ import org.apache.hadoop.hbase.snapshot.HBaseSnapshotException;
+ import org.apache.hadoop.hbase.snapshot.RestoreSnapshotException;
+@@ -2853,4 +2855,28 @@ public interface Admin extends Abortable, Closeable {
+    * @throws IOException if a remote or network exception occurs
+    */
+   void revoke(UserPermission userPermission) throws IOException;
++
++  /**
++   * Get specific user and global/namespace/table permissions
++   * @param userPermission the specific user and global/namespace/table
++   * @return The permission list
++   * @throws IOException if a remote or network exception occurs
++   */
++  List<UserPermission> getUserPermissions(UserPermission userPermission) throws IOException;
++
++  /**
++   * Check if user has specific table permissions
++   * @param userName the user
++   * @param tablePermission the specific table permission
++   * @return True if user has the specific table permission
++   * @throws IOException if a remote or network exception occurs
++   */
++  boolean hasPermission(String userName, TablePermission tablePermission) throws IOException;
++
++  /**
++   * Check if call user has specific permissions
++   * @param permissions the specific permission list
++   * @throws IOException if a remote or network exception occurs
++   */
++  void checkPermission(List<Permission> permissions) throws IOException;
+ }
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/client/AsyncAdmin.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/client/AsyncAdmin.java
+index 9abfe23..1623389 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/client/AsyncAdmin.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/client/AsyncAdmin.java
+@@ -45,6 +45,8 @@ import org.apache.hadoop.hbase.quotas.SpaceQuotaSnapshotView;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerDescription;
+ import org.apache.hadoop.hbase.replication.SyncReplicationState;
++import org.apache.hadoop.hbase.security.access.Permission;
++import org.apache.hadoop.hbase.security.access.TablePermission;
+ import org.apache.hadoop.hbase.security.access.UserPermission;
+ import org.apache.yetus.audience.InterfaceAudience;
+ 
+@@ -1342,4 +1344,25 @@ public interface AsyncAdmin {
+    * @param userPermission user and permissions
+    */
+   CompletableFuture<Void> revoke(UserPermission userPermission);
++
++  /**
++   * Get specific user and global/namespace/table permissions
++   * @param userPermission the specific user and global/namespace/table
++   * @return The permission list
++   */
++  CompletableFuture<List<UserPermission>> getUserPermissions(UserPermission userPermission);
++
++  /**
++   * Check if user has specific table permissions
++   * @param userName the user
++   * @param tablePermission the specific table permission
++   * @return True if user has the specific table permission
++   */
++  CompletableFuture<Boolean> hasPermission(String userName, TablePermission tablePermission);
++
++  /**
++   * Check if call user has specific permissions
++   * @param permissions the specific permission list
++   */
++  CompletableFuture<Void> checkPermission(List<Permission> permissions);
+ }
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/client/AsyncHBaseAdmin.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/client/AsyncHBaseAdmin.java
+index f39fe36..95b29ce 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/client/AsyncHBaseAdmin.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/client/AsyncHBaseAdmin.java
+@@ -42,6 +42,8 @@ import org.apache.hadoop.hbase.quotas.SpaceQuotaSnapshot;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerDescription;
+ import org.apache.hadoop.hbase.replication.SyncReplicationState;
++import org.apache.hadoop.hbase.security.access.Permission;
++import org.apache.hadoop.hbase.security.access.TablePermission;
+ import org.apache.hadoop.hbase.security.access.UserPermission;
+ import org.apache.hadoop.hbase.util.FutureUtils;
+ import org.apache.yetus.audience.InterfaceAudience;
+@@ -801,4 +803,20 @@ class AsyncHBaseAdmin implements AsyncAdmin {
+   public CompletableFuture<Void> revoke(UserPermission userPermission) {
+     return wrap(rawAdmin.revoke(userPermission));
+   }
++
++  @Override
++  public CompletableFuture<List<UserPermission>> getUserPermissions(UserPermission userPermission) {
++    return wrap(rawAdmin.getUserPermissions(userPermission));
++  }
++
++  @Override
++  public CompletableFuture<Boolean> hasPermission(String userName,
++      TablePermission tablePermission) {
++    return wrap(rawAdmin.hasPermission(userName, tablePermission));
++  }
++
++  @Override
++  public CompletableFuture<Void> checkPermission(List<Permission> permissions) {
++    return wrap(rawAdmin.checkPermission(permissions));
++  }
+ }
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/client/ConnectionImplementation.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/client/ConnectionImplementation.java
+index 5df3c07..cabfeef 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/client/ConnectionImplementation.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/client/ConnectionImplementation.java
+@@ -93,6 +93,12 @@ import org.apache.hbase.thirdparty.com.google.protobuf.ServiceException;
+ import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+ import org.apache.hadoop.hbase.shaded.protobuf.RequestConverter;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.CheckPermissionsRequest;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.CheckPermissionsResponse;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.GetUserPermissionsRequest;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.GetUserPermissionsResponse;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.HasPermissionRequest;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.HasPermissionResponse;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.ClientService.BlockingInterface;
+@@ -1787,6 +1793,24 @@ class ConnectionImplementation implements ClusterConnection, Closeable {
+           AccessControlProtos.RevokeRequest request) throws ServiceException {
+         return stub.revoke(controller, request);
+       }
++
++      @Override
++      public GetUserPermissionsResponse getUserPermissions(RpcController controller,
++          GetUserPermissionsRequest request) throws ServiceException {
++        return stub.getUserPermissions(controller, request);
++      }
++
++      @Override
++      public CheckPermissionsResponse checkPermissions(RpcController controller,
++          CheckPermissionsRequest request) throws ServiceException {
++        return stub.checkPermissions(controller, request);
++      }
++
++      @Override
++      public HasPermissionResponse hasPermission(RpcController controller,
++          HasPermissionRequest request) throws ServiceException {
++        return stub.hasPermission(controller, request);
++      }
+     };
+   }
+ 
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/client/HBaseAdmin.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/client/HBaseAdmin.java
+index 769ddd7..9897131 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/client/HBaseAdmin.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/client/HBaseAdmin.java
+@@ -91,7 +91,9 @@ import org.apache.hadoop.hbase.replication.ReplicationException;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerDescription;
+ import org.apache.hadoop.hbase.replication.SyncReplicationState;
++import org.apache.hadoop.hbase.security.access.Permission;
+ import org.apache.hadoop.hbase.security.access.ShadedAccessControlUtil;
++import org.apache.hadoop.hbase.security.access.TablePermission;
+ import org.apache.hadoop.hbase.security.access.UserPermission;
+ import org.apache.hadoop.hbase.snapshot.ClientSnapshotDescriptionUtils;
+ import org.apache.hadoop.hbase.snapshot.HBaseSnapshotException;
+@@ -115,6 +117,7 @@ import org.apache.hbase.thirdparty.com.google.protobuf.ServiceException;
+ 
+ import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+ import org.apache.hadoop.hbase.shaded.protobuf.RequestConverter;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.GrantRequest;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.RevokeRequest;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos;
+@@ -4494,4 +4497,47 @@ public class HBaseAdmin implements Admin {
+       }
+     });
+   }
++
++  @Override
++  public List<UserPermission> getUserPermissions(UserPermission userPermission) throws IOException {
++    AccessControlProtos.GetUserPermissionsRequest req =
++        ShadedAccessControlUtil.buildGetUserPermissionRequest(userPermission);
++    return executeCallable(
++      new MasterCallable<List<UserPermission>>(getConnection(), getRpcControllerFactory()) {
++        @Override
++        protected List<UserPermission> rpcCall() throws Exception {
++          AccessControlProtos.GetUserPermissionsResponse response =
++              this.master.getUserPermissions(getRpcController(), req);
++          return response.getUserPermissionList().stream()
++              .map(userPermission -> ShadedAccessControlUtil.toUserPermission(userPermission))
++              .collect(Collectors.toList());
++        }
++      });
++  }
++
++  @Override
++  public boolean hasPermission(String userName, TablePermission tablePermission)
++      throws IOException {
++    return executeCallable(new MasterCallable<Boolean>(getConnection(), getRpcControllerFactory()) {
++      @Override
++      protected Boolean rpcCall() throws Exception {
++        AccessControlProtos.HasPermissionRequest req =
++            ShadedAccessControlUtil.buildHasPermissionRequest(userName, tablePermission);
++        return this.master.hasPermission(getRpcController(), req).getHasPermission();
++      }
++    });
++  }
++
++  @Override
++  public void checkPermission(List<Permission> permissions) throws IOException {
++    executeCallable(new MasterCallable<Void>(getConnection(), getRpcControllerFactory()) {
++      @Override
++      protected Void rpcCall() throws Exception {
++        AccessControlProtos.CheckPermissionsRequest req =
++            ShadedAccessControlUtil.buildCheckPermissionRequest(permissions);
++        this.master.checkPermissions(getRpcController(), req);
++        return null;
++      }
++    });
++  }
+ }
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/client/RawAsyncHBaseAdmin.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/client/RawAsyncHBaseAdmin.java
+index d4b60fb..3ac6491 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/client/RawAsyncHBaseAdmin.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/client/RawAsyncHBaseAdmin.java
+@@ -83,7 +83,9 @@ import org.apache.hadoop.hbase.replication.ReplicationException;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerDescription;
+ import org.apache.hadoop.hbase.replication.SyncReplicationState;
++import org.apache.hadoop.hbase.security.access.Permission;
+ import org.apache.hadoop.hbase.security.access.ShadedAccessControlUtil;
++import org.apache.hadoop.hbase.security.access.TablePermission;
+ import org.apache.hadoop.hbase.security.access.UserPermission;
+ import org.apache.hadoop.hbase.snapshot.ClientSnapshotDescriptionUtils;
+ import org.apache.hadoop.hbase.snapshot.RestoreSnapshotException;
+@@ -104,8 +106,14 @@ import org.apache.hbase.thirdparty.io.netty.util.TimerTask;
+ 
+ import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+ import org.apache.hadoop.hbase.shaded.protobuf.RequestConverter;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.CheckPermissionsRequest;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.CheckPermissionsResponse;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.GetUserPermissionsRequest;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.GetUserPermissionsResponse;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.GrantRequest;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.GrantResponse;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.HasPermissionRequest;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.HasPermissionResponse;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.RevokeRequest;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.RevokeResponse;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.AdminService;
+@@ -3738,4 +3746,37 @@ class RawAsyncHBaseAdmin implements AsyncAdmin {
+           (s, c, req, done) -> s.revoke(c, req, done), resp -> null))
+         .call();
+   }
++
++  @Override
++  public CompletableFuture<List<UserPermission>> getUserPermissions(UserPermission userPermission) {
++    return this.<List<UserPermission>> newMasterCaller().action((controller, stub) -> this
++        .<GetUserPermissionsRequest, GetUserPermissionsResponse, List<UserPermission>> call(
++          controller, stub, ShadedAccessControlUtil.buildGetUserPermissionRequest(userPermission),
++          (s, c, req, done) -> s.getUserPermissions(c, req, done),
++          resp -> resp.getUserPermissionList().stream()
++              .map(uPerm -> ShadedAccessControlUtil.toUserPermission(uPerm))
++              .collect(Collectors.toList())))
++        .call();
++  }
++
++  @Override
++  public CompletableFuture<Boolean> hasPermission(String userName,
++      TablePermission tablePermission) {
++    return this.<Boolean> newMasterCaller()
++        .action((controller, stub) -> this
++            .<HasPermissionRequest, HasPermissionResponse, Boolean> call(controller, stub,
++              ShadedAccessControlUtil.buildHasPermissionRequest(userName, tablePermission),
++              (s, c, req, done) -> s.hasPermission(c, req, done), resp -> resp.getHasPermission()))
++        .call();
++  }
++
++  @Override
++  public CompletableFuture<Void> checkPermission(List<Permission> permissions) {
++    return this.<Void> newMasterCaller()
++        .action(
++          (controller, stub) -> this.<CheckPermissionsRequest, CheckPermissionsResponse, Void> call(
++            controller, stub, ShadedAccessControlUtil.buildCheckPermissionRequest(permissions),
++            (s, c, req, done) -> s.checkPermissions(c, req, done), resp -> null))
++        .call();
++  }
+ }
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/client/ShortCircuitMasterConnection.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/client/ShortCircuitMasterConnection.java
+index 02935548..98ca406 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/client/ShortCircuitMasterConnection.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/client/ShortCircuitMasterConnection.java
+@@ -21,8 +21,14 @@ import org.apache.yetus.audience.InterfaceAudience;
+ import org.apache.hbase.thirdparty.com.google.protobuf.RpcController;
+ import org.apache.hbase.thirdparty.com.google.protobuf.ServiceException;
+ 
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.CheckPermissionsRequest;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.CheckPermissionsResponse;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.GetUserPermissionsRequest;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.GetUserPermissionsResponse;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.GrantRequest;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.GrantResponse;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.HasPermissionRequest;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.HasPermissionResponse;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.RevokeRequest;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.RevokeResponse;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.CoprocessorServiceRequest;
+@@ -680,4 +686,22 @@ public class ShortCircuitMasterConnection implements MasterKeepAliveConnection {
+       throws ServiceException {
+     return stub.revoke(controller, request);
+   }
++
++  @Override
++  public GetUserPermissionsResponse getUserPermissions(RpcController controller,
++      GetUserPermissionsRequest request) throws ServiceException {
++    return stub.getUserPermissions(controller, request);
++  }
++
++  @Override
++  public CheckPermissionsResponse checkPermissions(RpcController controller,
++      CheckPermissionsRequest request) throws ServiceException {
++    return stub.checkPermissions(controller, request);
++  }
++
++  @Override
++  public HasPermissionResponse hasPermission(RpcController controller, HasPermissionRequest request)
++      throws ServiceException {
++    return stub.hasPermission(controller, request);
++  }
+ }
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/security/access/AccessControlClient.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/security/access/AccessControlClient.java
+index 1031cfe..909da96 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/security/access/AccessControlClient.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/security/access/AccessControlClient.java
+@@ -24,11 +24,11 @@ import java.util.regex.Pattern;
+ 
+ import org.apache.commons.lang3.StringUtils;
+ import org.apache.hadoop.hbase.HConstants;
+-import org.apache.hadoop.hbase.HTableDescriptor;
+ import org.apache.hadoop.hbase.MasterNotRunningException;
+ import org.apache.hadoop.hbase.NamespaceDescriptor;
+ import org.apache.hadoop.hbase.TableName;
+ import org.apache.hadoop.hbase.ZooKeeperConnectionException;
++import org.apache.hadoop.hbase.client.TableDescriptor;
+ import org.apache.yetus.audience.InterfaceAudience;
+ import org.apache.hadoop.hbase.client.Admin;
+ import org.apache.hadoop.hbase.client.Connection;
+@@ -252,36 +252,26 @@ public class AccessControlClient {
+    */
+   public static List<UserPermission> getUserPermissions(Connection connection, String tableRegex,
+       String userName) throws Throwable {
+-    /**
+-     * TODO: Pass an rpcController HBaseRpcController controller = ((ClusterConnection)
+-     * connection).getRpcControllerFactory().newController();
+-     */
+     List<UserPermission> permList = new ArrayList<>();
+-    try (Table table = connection.getTable(ACL_TABLE_NAME)) {
+-      try (Admin admin = connection.getAdmin()) {
+-        CoprocessorRpcChannel service = table.coprocessorService(HConstants.EMPTY_START_ROW);
+-        BlockingInterface protocol =
+-            AccessControlProtos.AccessControlService.newBlockingStub(service);
+-        HTableDescriptor[] htds = null;
+-        if (tableRegex == null || tableRegex.isEmpty()) {
+-          permList = AccessControlUtil.getUserPermissions(null, protocol, userName);
+-        } else if (tableRegex.charAt(0) == '@') { // Namespaces
+-          String namespaceRegex = tableRegex.substring(1);
+-          for (NamespaceDescriptor nsds : admin.listNamespaceDescriptors()) { // Read out all
+-                                                                              // namespaces
+-            String namespace = nsds.getName();
+-            if (namespace.matches(namespaceRegex)) { // Match the given namespace regex?
+-              permList.addAll(AccessControlUtil.getUserPermissions(null, protocol,
+-                Bytes.toBytes(namespace), userName));
+-            }
+-          }
+-        } else { // Tables
+-          htds = admin.listTables(Pattern.compile(tableRegex), true);
+-          for (HTableDescriptor htd : htds) {
+-            permList.addAll(AccessControlUtil.getUserPermissions(null, protocol, htd.getTableName(),
+-              null, null, userName));
++    try (Admin admin = connection.getAdmin()) {
++      if (tableRegex == null || tableRegex.isEmpty()) {
++        permList = admin.getUserPermissions(new UserPermission(userName, new GlobalPermission()));
++      } else if (tableRegex.charAt(0) == '@') { // Namespaces
++        String namespaceRegex = tableRegex.substring(1);
++        for (NamespaceDescriptor nsds : admin.listNamespaceDescriptors()) { // Read out all
++          // namespaces
++          String namespace = nsds.getName();
++          if (namespace.matches(namespaceRegex)) { // Match the given namespace regex?
++            permList.addAll(admin.getUserPermissions(
++              new UserPermission(userName, new NamespacePermission(namespace))));
+           }
+         }
++      } else { // Tables
++        List<TableDescriptor> htds = admin.listTableDescriptors(Pattern.compile(tableRegex), true);
++        for (TableDescriptor htd : htds) {
++          permList.addAll(admin.getUserPermissions(
++            new UserPermission(userName, new TablePermission(htd.getTableName()))));
++        }
+       }
+     }
+     return permList;
+@@ -350,22 +340,14 @@ public class AccessControlClient {
+     if (tableRegex == null || tableRegex.isEmpty() || tableRegex.charAt(0) == '@') {
+       throw new IllegalArgumentException("Table name can't be null or empty or a namespace.");
+     }
+-    /**
+-     * TODO: Pass an rpcController HBaseRpcController controller = ((ClusterConnection)
+-     * connection).getRpcControllerFactory().newController();
+-     */
+     List<UserPermission> permList = new ArrayList<UserPermission>();
+-    try (Table table = connection.getTable(ACL_TABLE_NAME)) {
+-      try (Admin admin = connection.getAdmin()) {
+-        CoprocessorRpcChannel service = table.coprocessorService(HConstants.EMPTY_START_ROW);
+-        BlockingInterface protocol =
+-            AccessControlProtos.AccessControlService.newBlockingStub(service);
+-        HTableDescriptor[] htds = admin.listTables(Pattern.compile(tableRegex), true);
+-        // Retrieve table permissions
+-        for (HTableDescriptor htd : htds) {
+-          permList.addAll(AccessControlUtil.getUserPermissions(null, protocol, htd.getTableName(),
+-            columnFamily, columnQualifier, userName));
+-        }
++    try (Admin admin = connection.getAdmin()) {
++      List<TableDescriptor> htds = admin.listTableDescriptors(Pattern.compile(tableRegex), true);
++      // Retrieve table permissions
++      byte[] actions = null;
++      for (TableDescriptor htd : htds) {
++        permList.addAll(admin.getUserPermissions(new UserPermission(userName,
++            new TablePermission(htd.getTableName(), columnFamily, columnQualifier, actions))));
+       }
+     }
+     return permList;
+@@ -412,19 +394,7 @@ public class AccessControlClient {
+     if (StringUtils.isEmpty(tableName) || StringUtils.isEmpty(userName)) {
+       throw new IllegalArgumentException("Table and user name can't be null or empty.");
+     }
+-    boolean hasPermission = false;
+-    /**
+-     * todo: pass an rpccontroller hbaserpccontroller controller = ((clusterconnection)
+-     * connection).getrpccontrollerfactory().newcontroller();
+-     */
+-    try (Table table = connection.getTable(ACL_TABLE_NAME)) {
+-      CoprocessorRpcChannel service = table.coprocessorService(HConstants.EMPTY_START_ROW);
+-      BlockingInterface protocol =
+-          AccessControlProtos.AccessControlService.newBlockingStub(service);
+-      // Check whether user has permission
+-      hasPermission = AccessControlUtil.hasPermission(null, protocol, TableName.valueOf(tableName),
+-        columnFamily, columnQualifier, userName, actions);
+-    }
+-    return hasPermission;
++    return connection.getAdmin().hasPermission(userName,
++      new TablePermission(TableName.valueOf(tableName), columnFamily, columnQualifier, actions));
+   }
+ }
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/security/access/AccessControlUtil.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/security/access/AccessControlUtil.java
+index 4bae943..e3b3874 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/security/access/AccessControlUtil.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/security/access/AccessControlUtil.java
+@@ -655,7 +655,9 @@ public class AccessControlUtil {
+    * @param controller RpcController
+    * @param protocol the AccessControlService protocol proxy
+    * @throws ServiceException on failure
++   * @deprecated Use {@link Admin#getUserPermissions(UserPermission)} instead.
+    */
++  @Deprecated
+   public static List<UserPermission> getUserPermissions(RpcController controller,
+       AccessControlService.BlockingInterface protocol) throws ServiceException {
+     return getUserPermissions(controller, protocol, HConstants.EMPTY_STRING);
+@@ -667,7 +669,9 @@ public class AccessControlUtil {
+    * @param protocol the AccessControlService protocol proxy
+    * @param userName User name, if empty then all user permissions will be retrieved.
+    * @throws ServiceException
++   * @deprecated Use {@link Admin#getUserPermissions(UserPermission)} instead.
+    */
++  @Deprecated
+   public static List<UserPermission> getUserPermissions(RpcController controller,
+       AccessControlService.BlockingInterface protocol, String userName) throws ServiceException {
+     AccessControlProtos.GetUserPermissionsRequest.Builder builder =
+@@ -696,7 +700,9 @@ public class AccessControlUtil {
+    * @param protocol the AccessControlService protocol proxy
+    * @param t optional table name
+    * @throws ServiceException
++   * @deprecated Use {@link Admin#getUserPermissions(UserPermission)} instead.
+    */
++  @Deprecated
+   public static List<UserPermission> getUserPermissions(RpcController controller,
+       AccessControlService.BlockingInterface protocol,
+       TableName t) throws ServiceException {
+@@ -713,7 +719,9 @@ public class AccessControlUtil {
+    * @param columnQualifier Column qualifier
+    * @param userName User name, if empty then all user permissions will be retrieved.
+    * @throws ServiceException
++   * @deprecated Use {@link Admin#getUserPermissions(UserPermission)} instead.
+    */
++  @Deprecated
+   public static List<UserPermission> getUserPermissions(RpcController controller,
+       AccessControlService.BlockingInterface protocol, TableName t, byte[] columnFamily,
+       byte[] columnQualifier, String userName) throws ServiceException {
+@@ -752,7 +760,9 @@ public class AccessControlUtil {
+    * @param protocol the AccessControlService protocol proxy
+    * @param namespace name of the namespace
+    * @throws ServiceException
++   * @deprecated Use {@link Admin#getUserPermissions(UserPermission)} instead.
+    */
++  @Deprecated
+   public static List<UserPermission> getUserPermissions(RpcController controller,
+       AccessControlService.BlockingInterface protocol,
+       byte[] namespace) throws ServiceException {
+@@ -766,7 +776,9 @@ public class AccessControlUtil {
+    * @param namespace name of the namespace
+    * @param userName User name, if empty then all user permissions will be retrieved.
+    * @throws ServiceException
++   * @deprecated Use {@link Admin#getUserPermissions(UserPermission)} instead.
+    */
++  @Deprecated
+   public static List<UserPermission> getUserPermissions(RpcController controller,
+       AccessControlService.BlockingInterface protocol, byte[] namespace, String userName)
+       throws ServiceException {
+@@ -804,7 +816,9 @@ public class AccessControlUtil {
+    * @param actions Actions
+    * @return true if access allowed, otherwise false
+    * @throws ServiceException
++   * @deprecated Use {@link Admin#hasPermission(String, TablePermission)} instead.
+    */
++  @Deprecated
+   public static boolean hasPermission(RpcController controller,
+       AccessControlService.BlockingInterface protocol, TableName tableName, byte[] columnFamily,
+       byte[] columnQualifier, String userName, Permission.Action[] actions)
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/security/access/ShadedAccessControlUtil.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/security/access/ShadedAccessControlUtil.java
+index 67fdba3..3cb0134 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/security/access/ShadedAccessControlUtil.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/security/access/ShadedAccessControlUtil.java
+@@ -24,13 +24,18 @@ import java.util.List;
+ import java.util.Map;
+ import org.apache.hadoop.hbase.TableName;
+ import org.apache.hadoop.hbase.security.access.Permission.Action;
++import org.apache.hadoop.hbase.util.Bytes;
+ import org.apache.yetus.audience.InterfaceAudience;
+ 
+ import org.apache.hbase.thirdparty.com.google.common.collect.ArrayListMultimap;
+ import org.apache.hbase.thirdparty.com.google.common.collect.ListMultimap;
+ import org.apache.hbase.thirdparty.com.google.protobuf.ByteString;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.CheckPermissionsRequest;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.GetUserPermissionsRequest;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.GetUserPermissionsResponse;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.GrantRequest;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.HasPermissionRequest;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.RevokeRequest;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
+ 
+@@ -274,6 +279,109 @@ public class ShadedAccessControlUtil {
+         .setPermission(toPermission(perm.getPermission())).build();
+   }
+ 
++  /**
++   * Converts a TablePermission proto to a client TablePermission object.
++   * @param proto the protobuf TablePermission
++   * @return the converted TablePermission
++   */
++  public static TablePermission toTablePermission(AccessControlProtos.TablePermission proto) {
++    if (!proto.hasTableName()) {
++      throw new IllegalStateException("TableName cannot be empty");
++    }
++    TableName table = ShadedAccessControlUtil.toTableName(proto.getTableName());
++    byte[] qualifier = null;
++    byte[] family = null;
++    if (proto.hasFamily()) {
++      family = proto.getFamily().toByteArray();
++    }
++    if (proto.hasQualifier()) {
++      qualifier = proto.getQualifier().toByteArray();
++    }
++    List<Permission.Action> actions = toPermissionActions(proto.getActionList());
++    return new TablePermission(table, family, qualifier,
++        actions.toArray(new Permission.Action[actions.size()]));
++  }
++
++  /**
++   * Converts a client TablePermission object to a TablePermission proto.
++   * @param tablePerm the protobuf TablePermission
++   * @return the converted TablePermission
++   */
++  public static AccessControlProtos.TablePermission toTablePermission(TablePermission tablePerm) {
++    AccessControlProtos.TablePermission.Builder builder =
++        AccessControlProtos.TablePermission.newBuilder();
++    builder.setTableName(toProtoTableName(tablePerm.getTableName()));
++    if (tablePerm.hasFamily()) {
++      builder.setFamily(ByteString.copyFrom(tablePerm.getFamily()));
++    }
++    if (tablePerm.hasQualifier()) {
++      builder.setQualifier(ByteString.copyFrom(tablePerm.getQualifier()));
++    }
++    Permission.Action[] actions = tablePerm.getActions();
++    if (actions != null) {
++      for (Permission.Action a : actions) {
++        builder.addAction(toPermissionAction(a));
++      }
++    }
++    return builder.build();
++  }
++
++  public static GetUserPermissionsRequest
++      buildGetUserPermissionRequest(UserPermission userPermission) {
++    GetUserPermissionsRequest.Builder builder = GetUserPermissionsRequest.newBuilder();
++    if (userPermission.getUser() != null && userPermission.getUser().length() > 0) {
++      builder.setUserName(ByteString.copyFromUtf8(userPermission.getUser()));
++    }
++    Permission permission = userPermission.getPermission();
++    if (permission instanceof TablePermission) {
++      builder.setType(AccessControlProtos.Permission.Type.Table);
++      TablePermission tablePermission = (TablePermission) permission;
++      if (tablePermission.getTableName() == null) {
++        throw new IllegalStateException("TableName cannot be null");
++      }
++      builder.setTableName(toProtoTableName(tablePermission.getTableName()));
++      if (tablePermission.hasFamily() && Bytes.len(tablePermission.getFamily()) > 0) {
++        builder.setColumnFamily(ByteString.copyFrom(tablePermission.getFamily()));
++      }
++      if (tablePermission.hasQualifier() && Bytes.len(tablePermission.getQualifier()) > 0) {
++        builder.setColumnQualifier(ByteString.copyFrom(tablePermission.getQualifier()));
++      }
++    } else if (permission instanceof NamespacePermission) {
++      builder.setType(AccessControlProtos.Permission.Type.Namespace);
++      NamespacePermission namespacePermission = (NamespacePermission) permission;
++      if (namespacePermission.getNamespace() == null) {
++        throw new IllegalStateException("Namespace cannot be null");
++      }
++      builder.setNamespaceName(ByteString.copyFromUtf8(namespacePermission.getNamespace()));
++    } else {
++      builder.setType(AccessControlProtos.Permission.Type.Global);
++    }
++    return builder.build();
++  }
++
++  public static GetUserPermissionsResponse
++      buildGetUserPermissionsResponse(final List<UserPermission> permissions) {
++    GetUserPermissionsResponse.Builder builder = GetUserPermissionsResponse.newBuilder();
++    for (UserPermission perm : permissions) {
++      builder.addUserPermission(toUserPermission(perm));
++    }
++    return builder.build();
++  }
++
++  public static HasPermissionRequest buildHasPermissionRequest(String userName,
++      TablePermission tablePermission) {
++    return HasPermissionRequest.newBuilder().setUserName(ByteString.copyFromUtf8(userName))
++        .setTablePermission(toTablePermission(tablePermission)).build();
++  }
++
++  public static CheckPermissionsRequest buildCheckPermissionRequest(List<Permission> permissions) {
++    CheckPermissionsRequest.Builder builder = CheckPermissionsRequest.newBuilder();
++    for (Permission permission : permissions) {
++      builder.addPermission(toPermission(permission));
++    }
++    return builder.build();
++  }
++
+   public static GrantRequest buildGrantRequest(UserPermission userPermission,
+       boolean mergeExistingPermissions) {
+     return GrantRequest.newBuilder().setUserPermission(toUserPermission(userPermission))
+diff --git a/hbase-protocol-shaded/src/main/protobuf/AccessControl.proto b/hbase-protocol-shaded/src/main/protobuf/AccessControl.proto
+index 3b0e9bb..c8de79d 100644
+--- a/hbase-protocol-shaded/src/main/protobuf/AccessControl.proto
++++ b/hbase-protocol-shaded/src/main/protobuf/AccessControl.proto
+@@ -103,6 +103,9 @@ message GetUserPermissionsRequest {
+   optional Permission.Type type = 1;
+   optional TableName table_name = 2;
+   optional bytes namespace_name = 3;
++  optional bytes column_family = 4;
++  optional bytes column_qualifier = 5;
++  optional bytes user_name = 6;
+ }
+ 
+ message GetUserPermissionsResponse {
+@@ -116,6 +119,15 @@ message CheckPermissionsRequest {
+ message CheckPermissionsResponse {
+ }
+ 
++message HasPermissionRequest {
++  required TablePermission table_permission = 1;
++  required bytes user_name = 2;
++}
++
++message HasPermissionResponse {
++  optional bool has_permission = 1;
++}
++
+ service AccessControlService {
+     rpc Grant(GrantRequest)
+       returns (GrantResponse);
+diff --git a/hbase-protocol-shaded/src/main/protobuf/Master.proto b/hbase-protocol-shaded/src/main/protobuf/Master.proto
+index ec0b543..491d67a 100644
+--- a/hbase-protocol-shaded/src/main/protobuf/Master.proto
++++ b/hbase-protocol-shaded/src/main/protobuf/Master.proto
+@@ -1019,6 +1019,12 @@ service MasterService {
+   rpc Grant(GrantRequest) returns (GrantResponse);
+ 
+   rpc Revoke(RevokeRequest) returns (RevokeResponse);
++
++  rpc GetUserPermissions(GetUserPermissionsRequest) returns (GetUserPermissionsResponse);
++
++  rpc CheckPermissions(CheckPermissionsRequest) returns (CheckPermissionsResponse);
++
++  rpc HasPermission(HasPermissionRequest) returns (HasPermissionResponse);
+ }
+ 
+ // HBCK Service definitions.
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/coprocessor/MasterObserver.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/coprocessor/MasterObserver.java
+index 68e69b9..8d85d83 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/coprocessor/MasterObserver.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/coprocessor/MasterObserver.java
+@@ -37,6 +37,8 @@ import org.apache.hadoop.hbase.net.Address;
+ import org.apache.hadoop.hbase.quotas.GlobalQuotaSettings;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
+ import org.apache.hadoop.hbase.replication.SyncReplicationState;
++import org.apache.hadoop.hbase.security.access.Permission;
++import org.apache.hadoop.hbase.security.access.TablePermission;
+ import org.apache.hadoop.hbase.security.access.UserPermission;
+ import org.apache.yetus.audience.InterfaceAudience;
+ import org.apache.yetus.audience.InterfaceStability;
+@@ -1612,4 +1614,60 @@ public interface MasterObserver {
+   default void postRevoke(ObserverContext<MasterCoprocessorEnvironment> ctx,
+       UserPermission userPermission) throws IOException {
+   }
++
++  /**
++   * Called before getting user permissions.
++   * @param ctx the coprocessor instance's environment
++   * @param userPermission the user and permission
++   */
++  default void preGetUserPermissions(ObserverContext<MasterCoprocessorEnvironment> ctx,
++      UserPermission userPermission) throws IOException {
++  }
++
++  /**
++   * Called after getting user permissions.
++   * @param ctx the coprocessor instance's environment
++   * @param userPermission the user and permission
++   */
++  default void postGetUserPermissions(ObserverContext<MasterCoprocessorEnvironment> ctx,
++      UserPermission userPermission) throws IOException {
++  }
++
++  /**
++   * Called before checking permissions.
++   * @param ctx the coprocessor instance's environment
++   * @param permissions the permissions
++   */
++  default void preCheckPermissions(ObserverContext<MasterCoprocessorEnvironment> ctx,
++      List<Permission> permissions) throws IOException {
++  }
++
++  /**
++   * Called after checking permissions.
++   * @param ctx the coprocessor instance's environment
++   * @param permissions the permissions
++   */
++  default void postCheckPermissions(ObserverContext<MasterCoprocessorEnvironment> ctx,
++      List<Permission> permissions) throws IOException {
++  }
++
++  /**
++   * Called before checking if user has table permission.
++   * @param ctx the coprocessor instance's environment
++   * @param userName the user
++   * @param tablePermission the table permission
++   */
++  default void preHasPermission(ObserverContext<MasterCoprocessorEnvironment> ctx, String userName,
++      TablePermission tablePermission) throws IOException {
++  }
++
++  /**
++   * Called after checking if user has table permission.
++   * @param ctx the coprocessor instance's environment
++   * @param userName the user
++   * @param tablePermission the table permission
++   */
++  default void postHasPermission(ObserverContext<MasterCoprocessorEnvironment> ctx, String userName,
++      TablePermission tablePermission) throws IOException {
++  }
+ }
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/MasterCoprocessorHost.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/MasterCoprocessorHost.java
+index d999dae..a0934a2 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/MasterCoprocessorHost.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/MasterCoprocessorHost.java
+@@ -58,6 +58,8 @@ import org.apache.hadoop.hbase.quotas.GlobalQuotaSettings;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
+ import org.apache.hadoop.hbase.replication.SyncReplicationState;
+ import org.apache.hadoop.hbase.security.User;
++import org.apache.hadoop.hbase.security.access.Permission;
++import org.apache.hadoop.hbase.security.access.TablePermission;
+ import org.apache.hadoop.hbase.security.access.UserPermission;
+ import org.apache.yetus.audience.InterfaceAudience;
+ import org.slf4j.Logger;
+@@ -1873,4 +1875,58 @@ public class MasterCoprocessorHost
+       }
+     });
+   }
++
++  public void preGetUserPermissions(UserPermission userPermission) throws IOException {
++    execOperation(coprocEnvironments.isEmpty() ? null : new MasterObserverOperation() {
++      @Override
++      public void call(MasterObserver observer) throws IOException {
++        observer.preGetUserPermissions(this, userPermission);
++      }
++    });
++  }
++
++  public void postGetUserPermissions(UserPermission permission) throws IOException {
++    execOperation(coprocEnvironments.isEmpty() ? null : new MasterObserverOperation() {
++      @Override
++      public void call(MasterObserver observer) throws IOException {
++        observer.postGetUserPermissions(this, permission);
++      }
++    });
++  }
++
++  public void preCheckPermissions(List<Permission> permissions) throws IOException {
++    execOperation(coprocEnvironments.isEmpty() ? null : new MasterObserverOperation() {
++      @Override
++      public void call(MasterObserver observer) throws IOException {
++        observer.preCheckPermissions(this, permissions);
++      }
++    });
++  }
++
++  public void postCheckPermissions(List<Permission> permissions) throws IOException {
++    execOperation(coprocEnvironments.isEmpty() ? null : new MasterObserverOperation() {
++      @Override
++      public void call(MasterObserver observer) throws IOException {
++        observer.postCheckPermissions(this, permissions);
++      }
++    });
++  }
++
++  public void preHasPermission(String userName, TablePermission permission) throws IOException {
++    execOperation(coprocEnvironments.isEmpty() ? null : new MasterObserverOperation() {
++      @Override
++      public void call(MasterObserver observer) throws IOException {
++        observer.preHasPermission(this, userName, permission);
++      }
++    });
++  }
++
++  public void postHasPermission(String userName, TablePermission permission) throws IOException {
++    execOperation(coprocEnvironments.isEmpty() ? null : new MasterObserverOperation() {
++      @Override
++      public void call(MasterObserver observer) throws IOException {
++        observer.postHasPermission(this, userName, permission);
++      }
++    });
++  }
+ }
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/MasterRpcServices.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/MasterRpcServices.java
+index 1ff3f0e..98ffc7a 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/MasterRpcServices.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/MasterRpcServices.java
+@@ -25,6 +25,7 @@ import java.net.BindException;
+ import java.net.InetAddress;
+ import java.net.InetSocketAddress;
+ import java.util.ArrayList;
++import java.util.Arrays;
+ import java.util.HashMap;
+ import java.util.HashSet;
+ import java.util.List;
+@@ -91,12 +92,18 @@ import org.apache.hadoop.hbase.regionserver.RpcSchedulerFactory;
+ import org.apache.hadoop.hbase.replication.ReplicationException;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerDescription;
++import org.apache.hadoop.hbase.security.Superusers;
+ import org.apache.hadoop.hbase.security.User;
+ import org.apache.hadoop.hbase.security.access.AccessChecker;
++import org.apache.hadoop.hbase.security.access.AccessChecker.InputUser;
+ import org.apache.hadoop.hbase.security.access.AccessControlLists;
+ import org.apache.hadoop.hbase.security.access.AccessController;
++import org.apache.hadoop.hbase.security.access.GlobalPermission;
++import org.apache.hadoop.hbase.security.access.NamespacePermission;
+ import org.apache.hadoop.hbase.security.access.Permission;
++import org.apache.hadoop.hbase.security.access.Permission.Action;
+ import org.apache.hadoop.hbase.security.access.ShadedAccessControlUtil;
++import org.apache.hadoop.hbase.security.access.TablePermission;
+ import org.apache.hadoop.hbase.security.access.UserPermission;
+ import org.apache.hadoop.hbase.security.visibility.VisibilityController;
+ import org.apache.hadoop.hbase.snapshot.ClientSnapshotDescriptionUtils;
+@@ -118,8 +125,16 @@ import org.apache.hbase.thirdparty.com.google.protobuf.UnsafeByteOperations;
+ 
+ import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+ import org.apache.hadoop.hbase.shaded.protobuf.ResponseConverter;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.CheckPermissionsRequest;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.CheckPermissionsResponse;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.GetUserPermissionsRequest;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.GetUserPermissionsResponse;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.GrantRequest;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.GrantResponse;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.HasPermissionRequest;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.HasPermissionResponse;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.Permission.Type;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.RevokeRequest;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.AccessControlProtos.RevokeResponse;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.CompactRegionRequest;
+@@ -2554,6 +2569,136 @@ public class MasterRpcServices extends RSRpcServices
+     }
+   }
+ 
++  @Override
++  public GetUserPermissionsResponse getUserPermissions(RpcController controller,
++      GetUserPermissionsRequest request) throws ServiceException {
++    try {
++      final String userName = request.hasUserName() ? request.getUserName().toStringUtf8() : null;
++      String namespace =
++          request.hasNamespaceName() ? request.getNamespaceName().toStringUtf8() : null;
++      TableName table =
++          request.hasTableName() ? ProtobufUtil.toTableName(request.getTableName()) : null;
++      byte[] cf = request.hasColumnFamily() ? request.getColumnFamily().toByteArray() : null;
++      byte[] cq = request.hasColumnQualifier() ? request.getColumnQualifier().toByteArray() : null;
++      Type permissionType = request.hasType() ? request.getType() : null;
++
++      UserPermission userPermission = null;
++      if (permissionType == Type.Table) {
++        byte[] actions = null;
++        userPermission = new UserPermission(userName, new TablePermission(table, cf, cq, actions));
++      } else if (permissionType == Type.Namespace) {
++        userPermission = new UserPermission(userName, new NamespacePermission(namespace));
++      } else {
++        userPermission = new UserPermission(userName, new GlobalPermission());
++      }
++      if (master.cpHost != null) {
++        master.getMasterCoprocessorHost().preGetUserPermissions(userPermission);
++      }
++
++      List<UserPermission> perms = null;
++      if (permissionType == Type.Table) {
++        if (cf != null || userName != null) {
++          perms = AccessControlLists.getUserTablePermissions(master.getConfiguration(), table, cf,
++            cq, userName, true);
++        } else {
++          perms = AccessControlLists.getUserTablePermissions(master.getConfiguration(), table, null,
++            null, null, false);
++        }
++      } else if (permissionType == Type.Namespace) {
++        if (userName != null) {
++          perms = AccessControlLists.getUserNamespacePermissions(master.getConfiguration(),
++            namespace, userName, true);
++        } else {
++          perms = AccessControlLists.getUserNamespacePermissions(master.getConfiguration(),
++            namespace, null, false);
++        }
++      } else {
++        if (userName != null) {
++          perms = AccessControlLists.getUserPermissions(master.getConfiguration(), null, null, null,
++            userName, true);
++        } else {
++          perms = AccessControlLists.getUserPermissions(master.getConfiguration(), null, null, null,
++            null, false);
++        }
++        // Skip super users when filter user is specified
++        if (userName == null) {
++          // Adding superusers explicitly to the result set as AccessControlLists do not store
++          // them. Also using acl as table name to be inline with the results of global admin and
++          // will help in avoiding any leakage of information about being superusers.
++          for (String user : Superusers.getSuperUsers()) {
++            perms.add(new UserPermission(user, Action.values()));
++          }
++        }
++      }
++
++      if (master.cpHost != null) {
++        master.getMasterCoprocessorHost().postGetUserPermissions(userPermission);
++      }
++      AccessControlProtos.GetUserPermissionsResponse response =
++          ShadedAccessControlUtil.buildGetUserPermissionsResponse(perms);
++      return response;
++    } catch (IOException ioe) {
++      throw new ServiceException(ioe);
++    }
++  }
++
++  @Override
++  public CheckPermissionsResponse checkPermissions(RpcController controller,
++      CheckPermissionsRequest request) throws ServiceException {
++    List<Permission> permissions = new ArrayList<>();
++    for (int i = 0; i < request.getPermissionCount(); i++) {
++      permissions.add(ShadedAccessControlUtil.toPermission(request.getPermission(i)));
++    }
++    try {
++      if (master.cpHost != null) {
++        master.getMasterCoprocessorHost().preCheckPermissions(permissions);
++        master.getMasterCoprocessorHost().postCheckPermissions(permissions);
++      }
++      return AccessControlProtos.CheckPermissionsResponse.getDefaultInstance();
++    } catch (IOException ioe) {
++      throw new ServiceException(ioe);
++    }
++  }
++
++  @Override
++  public HasPermissionResponse hasPermission(RpcController controller, HasPermissionRequest request)
++      throws ServiceException {
++    if (!request.hasUserName()) {
++      throw new IllegalStateException("Input username cannot be empty");
++    }
++    final String userName = request.getUserName().toStringUtf8();
++    TablePermission tPerm = ShadedAccessControlUtil.toTablePermission(request.getTablePermission());
++    try {
++      if (master.cpHost != null) {
++        master.getMasterCoprocessorHost().preHasPermission(userName, tPerm);
++      }
++      User caller = RpcServer.getRequestUser().orElse(null);
++      User filterUser = caller;
++      if (!caller.getShortName().equals(userName)) {
++        // Initialize user instance for the input user name
++        List<String> groups = AccessChecker.getUserGroups(userName);
++        filterUser = new InputUser(userName, groups.toArray(new String[groups.size()]));
++      }
++      User user = filterUser;
++      boolean hasPermission = true;
++      if (accessChecker != null) {
++        hasPermission = Arrays.stream(tPerm.getActions())
++            .allMatch(action -> accessChecker.permissionGranted("hasPermission", user, action,
++              tPerm.getTableName(), tPerm.getFamily(), tPerm.getQualifier()).isAllowed());
++      } else {
++        LOG.warn("hbase.security.authorization is false when check if user has permission");
++      }
++      if (master.cpHost != null) {
++        master.getMasterCoprocessorHost().postHasPermission(userName, tPerm);
++      }
++      HasPermissionResponse.Builder builder =
++          HasPermissionResponse.newBuilder().setHasPermission(hasPermission);
++      return builder.build();
++    } catch (IOException ioe) {
++      throw new ServiceException(ioe);
++    }
++  }
++
+   private boolean containMetaWals(ServerName serverName) throws IOException {
+     Path logDir = new Path(master.getWALRootDir(),
+         AbstractFSWALProvider.getWALDirectoryName(serverName.toString()));
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessChecker.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessChecker.java
+index 986efd7..a72186b 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessChecker.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessChecker.java
+@@ -26,8 +26,12 @@ import java.util.ArrayList;
+ import java.util.Collection;
+ import java.util.List;
+ import java.util.Map;
++import java.util.Set;
++import java.util.TreeMap;
+ 
+ import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.hbase.Cell;
++import org.apache.hadoop.hbase.CellUtil;
+ import org.apache.hadoop.hbase.DoNotRetryIOException;
+ import org.apache.hadoop.hbase.TableName;
+ import org.apache.hadoop.hbase.client.RegionInfo;
+@@ -35,12 +39,14 @@ import org.apache.hadoop.hbase.ipc.RpcServer;
+ import org.apache.hadoop.hbase.security.AccessDeniedException;
+ import org.apache.hadoop.hbase.security.User;
+ import org.apache.hadoop.hbase.security.access.Permission.Action;
++import org.apache.hadoop.hbase.util.Bytes;
+ import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
+ import org.apache.hadoop.security.Groups;
+ import org.apache.hadoop.security.HadoopKerberosName;
+ import org.apache.yetus.audience.InterfaceAudience;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
++import org.apache.hbase.thirdparty.com.google.common.collect.ImmutableSet;
+ 
+ @InterfaceAudience.Private
+ public final class AccessChecker {
+@@ -370,6 +376,106 @@ public final class AccessChecker {
+     }
+   }
+ 
++  public AuthResult permissionGranted(String request, User user, Action permRequest,
++      TableName tableName, byte[] family, byte[] qualifier) {
++    Map<byte[], ? extends Collection<byte[]>> map = makeFamilyMap(family, qualifier);
++    return permissionGranted(request, user, permRequest, tableName, map);
++  }
++
++  /**
++   * Check the current user for authorization to perform a specific action against the given set of
++   * row data.
++   * <p>
++   * Note: Ordering of the authorization checks has been carefully optimized to short-circuit the
++   * most common requests and minimize the amount of processing required.
++   * </p>
++   * @param request User request
++   * @param user User name
++   * @param permRequest the action being requested
++   * @param tableName Table name
++   * @param families the map of column families to qualifiers present in the request
++   * @return an authorization result
++   */
++  public AuthResult permissionGranted(String request, User user, Action permRequest,
++      TableName tableName, Map<byte[], ? extends Collection<?>> families) {
++    // 1. All users need read access to hbase:meta table.
++    // this is a very common operation, so deal with it quickly.
++    if (TableName.META_TABLE_NAME.equals(tableName)) {
++      if (permRequest == Action.READ) {
++        return AuthResult.allow(request, "All users allowed", user, permRequest, tableName,
++          families);
++      }
++    }
++
++    if (user == null) {
++      return AuthResult.deny(request, "No user associated with request!", null, permRequest,
++        tableName, families);
++    }
++
++    // 2. check for the table-level, if successful we can short-circuit
++    if (getAuthManager().authorizeUserTable(user, tableName, permRequest)) {
++      return AuthResult.allow(request, "Table permission granted", user, permRequest, tableName,
++        families);
++    }
++
++    // 3. check permissions against the requested families
++    if (families != null && families.size() > 0) {
++      // all families must pass
++      for (Map.Entry<byte[], ? extends Collection<?>> family : families.entrySet()) {
++        // a) check for family level access
++        if (getAuthManager().authorizeUserTable(user, tableName, family.getKey(), permRequest)) {
++          continue; // family-level permission overrides per-qualifier
++        }
++
++        // b) qualifier level access can still succeed
++        if ((family.getValue() != null) && (family.getValue().size() > 0)) {
++          if (family.getValue() instanceof Set) {
++            // for each qualifier of the family
++            Set<byte[]> familySet = (Set<byte[]>) family.getValue();
++            for (byte[] qualifier : familySet) {
++              if (!getAuthManager().authorizeUserTable(user, tableName, family.getKey(), qualifier,
++                permRequest)) {
++                return AuthResult.deny(request, "Failed qualifier check", user, permRequest,
++                  tableName, makeFamilyMap(family.getKey(), qualifier));
++              }
++            }
++          } else if (family.getValue() instanceof List) { // List<Cell>
++            List<Cell> cellList = (List<Cell>) family.getValue();
++            for (Cell cell : cellList) {
++              if (!getAuthManager().authorizeUserTable(user, tableName, family.getKey(),
++                CellUtil.cloneQualifier(cell), permRequest)) {
++                return AuthResult.deny(request, "Failed qualifier check", user, permRequest,
++                  tableName, makeFamilyMap(family.getKey(), CellUtil.cloneQualifier(cell)));
++              }
++            }
++          }
++        } else {
++          // no qualifiers and family-level check already failed
++          return AuthResult.deny(request, "Failed family check", user, permRequest, tableName,
++            makeFamilyMap(family.getKey(), null));
++        }
++      }
++
++      // all family checks passed
++      return AuthResult.allow(request, "All family checks passed", user, permRequest, tableName,
++        families);
++    }
++
++    // 4. no families to check and table level access failed
++    return AuthResult.deny(request, "No families to check and table permission failed", user,
++      permRequest, tableName, families);
++  }
++
++  private Map<byte[], ? extends Collection<byte[]>> makeFamilyMap(byte[] family, byte[] qualifier) {
++    if (family == null) {
++      return null;
++    }
++
++    Map<byte[], Collection<byte[]>> familyMap = new TreeMap<>(Bytes.BYTES_COMPARATOR);
++    familyMap.put(family, qualifier != null ? ImmutableSet.of(qualifier) : null);
++    return familyMap;
++  }
++
+   public static void logResult(AuthResult result) {
+     if (AUDITLOG.isTraceEnabled()) {
+       AUDITLOG.trace(
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessControlLists.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessControlLists.java
+index b5bf3a4..bbccc6d 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessControlLists.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessControlLists.java
+@@ -538,8 +538,9 @@ public class AccessControlLists {
+    * Returns the currently granted permissions for a given table as the specified user plus
+    * associated permissions.
+    */
+-  static List<UserPermission> getUserTablePermissions(Configuration conf, TableName tableName,
+-      byte[] cf, byte[] cq, String userName, boolean hasFilterUser) throws IOException {
++  public static List<UserPermission> getUserTablePermissions(Configuration conf,
++      TableName tableName, byte[] cf, byte[] cq, String userName, boolean hasFilterUser)
++      throws IOException {
+     return getUserPermissions(conf, tableName == null ? null : tableName.getName(), cf, cq,
+       userName, hasFilterUser);
+   }
+@@ -548,8 +549,8 @@ public class AccessControlLists {
+    * Returns the currently granted permissions for a given namespace as the specified user plus
+    * associated permissions.
+    */
+-  static List<UserPermission> getUserNamespacePermissions(Configuration conf, String namespace,
+-      String user, boolean hasFilterUser) throws IOException {
++  public static List<UserPermission> getUserNamespacePermissions(Configuration conf,
++      String namespace, String user, boolean hasFilterUser) throws IOException {
+     return getUserPermissions(conf, Bytes.toBytes(toNamespaceEntry(namespace)), null, null, user,
+       hasFilterUser);
+   }
+@@ -566,8 +567,8 @@ public class AccessControlLists {
+    * @return List of UserPermissions
+    * @throws IOException on failure
+    */
+-  static List<UserPermission> getUserPermissions(Configuration conf, byte[] entryName, byte[] cf,
+-      byte[] cq, String user, boolean hasFilterUser) throws IOException {
++  public static List<UserPermission> getUserPermissions(Configuration conf, byte[] entryName,
++      byte[] cf, byte[] cq, String user, boolean hasFilterUser) throws IOException {
+     ListMultimap<String, UserPermission> allPerms =
+         getPermissions(conf, entryName, null, cf, cq, user, hasFilterUser);
+     List<UserPermission> perms = new ArrayList<>();
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessController.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessController.java
+index d6a2463..23d04a4 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessController.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessController.java
+@@ -141,7 +141,6 @@ import org.apache.hbase.thirdparty.com.google.common.collect.ListMultimap;
+ import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
+ import org.apache.hbase.thirdparty.com.google.common.collect.MapMaker;
+ import org.apache.hbase.thirdparty.com.google.common.collect.Maps;
+-import org.apache.hbase.thirdparty.com.google.common.collect.Sets;
+ 
+ /**
+  * Provides basic authorization checks for data access and administrative
+@@ -301,93 +300,6 @@ public class AccessController implements MasterCoprocessor, RegionCoprocessor,
+   /**
+    * Check the current user for authorization to perform a specific action against the given set of
+    * row data.
+-   * <p>
+-   * Note: Ordering of the authorization checks has been carefully optimized to short-circuit the
+-   * most common requests and minimize the amount of processing required.
+-   * </p>
+-   * @param request User request
+-   * @param user User name
+-   * @param permRequest the action being requested
+-   * @param e the coprocessor environment
+-   * @param tableName Table name
+-   * @param families the map of column families to qualifiers present in the request
+-   * @return an authorization result
+-   */
+-  private AuthResult permissionGranted(String request, User user, Action permRequest,
+-      RegionCoprocessorEnvironment e, TableName tableName,
+-      Map<byte[], ? extends Collection<?>> families) {
+-    // 1. All users need read access to hbase:meta table.
+-    // this is a very common operation, so deal with it quickly.
+-    if (TableName.META_TABLE_NAME.equals(tableName)) {
+-      if (permRequest == Action.READ) {
+-        return AuthResult.allow(request, "All users allowed", user, permRequest, tableName,
+-          families);
+-      }
+-    }
+-
+-    if (user == null) {
+-      return AuthResult.deny(request, "No user associated with request!", null,
+-        permRequest, tableName, families);
+-    }
+-
+-    // 2. check for the table-level, if successful we can short-circuit
+-    if (getAuthManager().authorizeUserTable(user, tableName, permRequest)) {
+-      return AuthResult.allow(request, "Table permission granted", user,
+-        permRequest, tableName, families);
+-    }
+-
+-    // 3. check permissions against the requested families
+-    if (families != null && families.size() > 0) {
+-      // all families must pass
+-      for (Map.Entry<byte [], ? extends Collection<?>> family : families.entrySet()) {
+-        // a) check for family level access
+-        if (getAuthManager().authorizeUserTable(user, tableName, family.getKey(),
+-            permRequest)) {
+-          continue;  // family-level permission overrides per-qualifier
+-        }
+-
+-        // b) qualifier level access can still succeed
+-        if ((family.getValue() != null) && (family.getValue().size() > 0)) {
+-          if (family.getValue() instanceof Set) {
+-            // for each qualifier of the family
+-            Set<byte[]> familySet = (Set<byte[]>)family.getValue();
+-            for (byte[] qualifier : familySet) {
+-              if (!getAuthManager().authorizeUserTable(user, tableName,
+-                    family.getKey(), qualifier, permRequest)) {
+-                return AuthResult.deny(request, "Failed qualifier check", user,
+-                  permRequest, tableName, makeFamilyMap(family.getKey(), qualifier));
+-              }
+-            }
+-          } else if (family.getValue() instanceof List) { // List<Cell>
+-            List<Cell> cellList = (List<Cell>)family.getValue();
+-            for (Cell cell : cellList) {
+-              if (!getAuthManager().authorizeUserTable(user, tableName, family.getKey(),
+-                  CellUtil.cloneQualifier(cell), permRequest)) {
+-                return AuthResult.deny(request, "Failed qualifier check", user, permRequest,
+-                  tableName, makeFamilyMap(family.getKey(), CellUtil.cloneQualifier(cell)));
+-              }
+-            }
+-          }
+-        } else {
+-          // no qualifiers and family-level check already failed
+-          return AuthResult.deny(request, "Failed family check", user, permRequest,
+-            tableName, makeFamilyMap(family.getKey(), null));
+-        }
+-      }
+-
+-      // all family checks passed
+-      return AuthResult.allow(request, "All family checks passed", user, permRequest,
+-          tableName, families);
+-    }
+-
+-    // 4. no families to check and table level access failed
+-    return AuthResult.deny(request, "No families to check and table permission failed",
+-        user, permRequest, tableName, families);
+-  }
+-
+-  /**
+-   * Check the current user for authorization to perform a specific action
+-   * against the given set of row data.
+    * @param opType the operation type
+    * @param user the user
+    * @param e the coprocessor environment
+@@ -400,7 +312,7 @@ public class AccessController implements MasterCoprocessor, RegionCoprocessor,
+       Map<byte [], ? extends Collection<?>> families, Action... actions) {
+     AuthResult result = null;
+     for (Action action: actions) {
+-      result = permissionGranted(opType.toString(), user, action, e,
++      result = accessChecker.permissionGranted(opType.toString(), user, action,
+         e.getRegion().getRegionInfo().getTable(), families);
+       if (!result.isAllowed()) {
+         return result;
+@@ -2132,6 +2044,10 @@ public class AccessController implements MasterCoprocessor, RegionCoprocessor,
+     done.run(response);
+   }
+ 
++  /**
++   * @deprecated Use {@link Admin#getUserPermissions(UserPermission)} instead.
++   */
++  @Deprecated
+   @Override
+   public void getUserPermissions(RpcController controller,
+       AccessControlProtos.GetUserPermissionsRequest request,
+@@ -2144,76 +2060,27 @@ public class AccessController implements MasterCoprocessor, RegionCoprocessor,
+           throw new CoprocessorException("AccessController not yet initialized");
+         }
+         User caller = RpcServer.getRequestUser().orElse(null);
+-
+-        List<UserPermission> perms = null;
+-        // Initialize username, cf and cq. Set to null if request doesn't have.
++        UserPermission userPermission;
+         final String userName = request.hasUserName() ? request.getUserName().toStringUtf8() : null;
+-        final byte[] cf =
+-            request.hasColumnFamily() ? request.getColumnFamily().toByteArray() : null;
+-        final byte[] cq =
+-            request.hasColumnQualifier() ? request.getColumnQualifier().toByteArray() : null;
+-
+         if (request.getType() == AccessControlProtos.Permission.Type.Table) {
+-          final TableName table = request.hasTableName() ?
+-            ProtobufUtil.toTableName(request.getTableName()) : null;
+-          accessChecker.requirePermission(caller, "userPermissions", table, cf, cq, userName,
+-            Action.ADMIN);
+-          perms = User.runAsLoginUser(new PrivilegedExceptionAction<List<UserPermission>>() {
+-            @Override
+-            public List<UserPermission> run() throws Exception {
+-              if (cf != null || userName != null) {
+-                // retrieve permission based on the requested parameters
+-                return AccessControlLists.getUserTablePermissions(regionEnv.getConfiguration(),
+-                  table, cf, cq, userName, true);
+-              } else {
+-                return AccessControlLists.getUserTablePermissions(regionEnv.getConfiguration(),
+-                  table, null, null, null, false);
+-              }
+-            }
+-          });
++          final TableName table =
++              request.hasTableName() ? ProtobufUtil.toTableName(request.getTableName()) : null;
++          final byte[] cf =
++              request.hasColumnFamily() ? request.getColumnFamily().toByteArray() : null;
++          final byte[] cq =
++              request.hasColumnQualifier() ? request.getColumnQualifier().toByteArray() : null;
++          byte[] actions = null;
++          userPermission =
++              new UserPermission(userName, new TablePermission(table, cf, cq, actions));
+         } else if (request.getType() == AccessControlProtos.Permission.Type.Namespace) {
+           final String namespace = request.getNamespaceName().toStringUtf8();
+-          accessChecker.requireNamespacePermission(caller, "userPermissions",
+-            namespace, userName, Action.ADMIN);
+-          perms = User.runAsLoginUser(new PrivilegedExceptionAction<List<UserPermission>>() {
+-            @Override
+-            public List<UserPermission> run() throws Exception {
+-              if (userName != null) {
+-                // retrieve permission based on the requested parameters
+-                return AccessControlLists.getUserNamespacePermissions(regionEnv.getConfiguration(),
+-                  namespace, userName, true);
+-              } else {
+-                return AccessControlLists.getUserNamespacePermissions(regionEnv.getConfiguration(),
+-                  namespace, null, false);
+-              }
+-            }
+-          });
++          userPermission = new UserPermission(userName, new NamespacePermission(namespace));
+         } else {
+-          accessChecker.requirePermission(caller, "userPermissions", userName, Action.ADMIN);
+-          perms = User.runAsLoginUser(new PrivilegedExceptionAction<List<UserPermission>>() {
+-            @Override
+-            public List<UserPermission> run() throws Exception {
+-              if (userName != null) {
+-                // retrieve permission based on the requested parameters
+-                return AccessControlLists.getUserPermissions(regionEnv.getConfiguration(), null,
+-                  null, null, userName, true);
+-              } else {
+-                return AccessControlLists.getUserPermissions(regionEnv.getConfiguration(), null,
+-                  null, null, null, false);
+-              }
+-            }
+-          });
+-
+-          // Skip super users when filter user is specified
+-          if (userName == null) {
+-            // Adding superusers explicitly to the result set as AccessControlLists do not store
+-            // them. Also using acl as table name to be inline with the results of global admin and
+-            // will help in avoiding any leakage of information about being superusers.
+-            for (String user : Superusers.getSuperUsers()) {
+-              perms.add(new UserPermission(user, Action.values()));
+-            }
+-          }
++          userPermission = new UserPermission(userName, new GlobalPermission());
+         }
++        preGetUserPermissions(caller, userPermission);
++        List<UserPermission> perms =
++            regionEnv.getConnection().getAdmin().getUserPermissions(userPermission);
+         response = AccessControlUtil.buildGetUserPermissionsResponse(perms);
+       } else {
+         throw new CoprocessorException(AccessController.class, "This method "
+@@ -2226,76 +2093,35 @@ public class AccessController implements MasterCoprocessor, RegionCoprocessor,
+     done.run(response);
+   }
+ 
++  /**
++   * @deprecated Use {@link Admin#checkPermission(List)} instead.
++   */
++  @Deprecated
+   @Override
+   public void checkPermissions(RpcController controller,
+-                               AccessControlProtos.CheckPermissionsRequest request,
+-                               RpcCallback<AccessControlProtos.CheckPermissionsResponse> done) {
+-    Permission[] permissions = new Permission[request.getPermissionCount()];
+-    for (int i=0; i < request.getPermissionCount(); i++) {
+-      permissions[i] = AccessControlUtil.toPermission(request.getPermission(i));
+-    }
++      AccessControlProtos.CheckPermissionsRequest request,
++      RpcCallback<AccessControlProtos.CheckPermissionsResponse> done) {
+     AccessControlProtos.CheckPermissionsResponse response = null;
+     try {
+       User user = RpcServer.getRequestUser().orElse(null);
+       TableName tableName = regionEnv.getRegion().getTableDescriptor().getTableName();
+-      for (Permission permission : permissions) {
++      List<Permission> permissions = new ArrayList<>();
++      for (int i = 0; i < request.getPermissionCount(); i++) {
++        Permission permission = AccessControlUtil.toPermission(request.getPermission(i));
++        permissions.add(permission);
+         if (permission instanceof TablePermission) {
+-          // Check table permissions
+-
+           TablePermission tperm = (TablePermission) permission;
+-          for (Action action : permission.getActions()) {
+-            if (!tperm.getTableName().equals(tableName)) {
+-              throw new CoprocessorException(AccessController.class, String.format("This method "
+-                  + "can only execute at the table specified in TablePermission. " +
+-                  "Table of the region:%s , requested table:%s", tableName,
+-                  tperm.getTableName()));
+-            }
+-
+-            Map<byte[], Set<byte[]>> familyMap = new TreeMap<>(Bytes.BYTES_COMPARATOR);
+-            if (tperm.getFamily() != null) {
+-              if (tperm.getQualifier() != null) {
+-                Set<byte[]> qualifiers = Sets.newTreeSet(Bytes.BYTES_COMPARATOR);
+-                qualifiers.add(tperm.getQualifier());
+-                familyMap.put(tperm.getFamily(), qualifiers);
+-              } else {
+-                familyMap.put(tperm.getFamily(), null);
+-              }
+-            }
+-
+-            AuthResult result = permissionGranted("checkPermissions", user, action, regionEnv,
+-              regionEnv.getRegion().getRegionInfo().getTable(), familyMap);
+-            AccessChecker.logResult(result);
+-            if (!result.isAllowed()) {
+-              // Even if passive we need to throw an exception here, we support checking
+-              // effective permissions, so throw unconditionally
+-              throw new AccessDeniedException("Insufficient permissions (table=" + tableName +
+-                (familyMap.size() > 0 ? ", family: " + result.toFamilyString() : "") +
+-                ", action=" + action.toString() + ")");
+-            }
+-          }
+-
+-        } else {
+-          // Check global permissions
+-
+-          for (Action action : permission.getActions()) {
+-            AuthResult result;
+-            if (getAuthManager().authorizeUserGlobal(user, action)) {
+-              result = AuthResult.allow("checkPermissions", "Global action allowed", user,
+-                action, null, null);
+-            } else {
+-              result = AuthResult.deny("checkPermissions", "Global action denied", user, action,
+-                null, null);
+-            }
+-            AccessChecker.logResult(result);
+-            if (!result.isAllowed()) {
+-              // Even if passive we need to throw an exception here, we support checking
+-              // effective permissions, so throw unconditionally
+-              throw new AccessDeniedException("Insufficient permissions (action=" +
+-                action.toString() + ")");
+-            }
++          if (!tperm.getTableName().equals(tableName)) {
++            throw new CoprocessorException(AccessController.class,
++                String.format(
++                  "This method can only execute at the table specified in "
++                      + "TablePermission. Table of the region:%s , requested table:%s",
++                  tableName, tperm.getTableName()));
+           }
+         }
+       }
++      preCheckPermissions(user, permissions);
++      regionEnv.getConnection().getAdmin().checkPermission(permissions);
+       response = AccessControlProtos.CheckPermissionsResponse.getDefaultInstance();
+     } catch (IOException ioe) {
+       CoprocessorRpcUtils.setControllerException(controller, ioe);
+@@ -2589,6 +2415,10 @@ public class AccessController implements MasterCoprocessor, RegionCoprocessor,
+     return userProvider.getCurrent();
+   }
+ 
++  /**
++   * @deprecated Use {@link Admin#hasPermission(String, TablePermission)} instead.
++   */
++  @Deprecated
+   @Override
+   public void hasPermission(RpcController controller, HasPermissionRequest request,
+       RpcCallback<HasPermissionResponse> done) {
+@@ -2602,33 +2432,9 @@ public class AccessController implements MasterCoprocessor, RegionCoprocessor,
+     AccessControlProtos.HasPermissionResponse response = null;
+     try {
+       User caller = RpcServer.getRequestUser().orElse(null);
+-      // User instance for the input user name
+-      User filterUser = accessChecker.validateCallerWithFilterUser(caller, tPerm, inputUserName);
+-
+-      // Initialize family and qualifier map
+-      Map<byte[], Set<byte[]>> familyMap = new TreeMap<byte[], Set<byte[]>>(Bytes.BYTES_COMPARATOR);
+-      if (tPerm.getFamily() != null) {
+-        if (tPerm.getQualifier() != null) {
+-          Set<byte[]> qualifiers = Sets.newTreeSet(Bytes.BYTES_COMPARATOR);
+-          qualifiers.add(tPerm.getQualifier());
+-          familyMap.put(tPerm.getFamily(), qualifiers);
+-        } else {
+-          familyMap.put(tPerm.getFamily(), null);
+-        }
+-      }
+-
+-      // Iterate each action and check whether permission granted
+-      boolean hasPermission = false;
+-      for (Action action : tPerm.getActions()) {
+-        AuthResult result = permissionGranted("hasPermission", filterUser, action, regionEnv,
+-          tPerm.getTableName(), familyMap);
+-        if (!result.isAllowed()) {
+-          hasPermission = false;
+-          // Break the loop is any action is not allowed
+-          break;
+-        }
+-        hasPermission = true;
+-      }
++      preHasPermission(caller, inputUserName, tPerm);
++      boolean hasPermission =
++          regionEnv.getConnection().getAdmin().hasPermission(inputUserName, tPerm);
+       response = ResponseConverter.buildHasPermissionResponse(hasPermission);
+     } catch (IOException ioe) {
+       ResponseConverter.setControllerException(controller, ioe);
+@@ -2667,4 +2473,98 @@ public class AccessController implements MasterCoprocessor, RegionCoprocessor,
+       default:
+     }
+   }
++
++  @Override
++  public void preGetUserPermissions(ObserverContext<MasterCoprocessorEnvironment> ctx,
++      UserPermission permission) throws IOException {
++    preGetUserPermissions(getActiveUser(ctx), permission);
++  }
++
++  private void preGetUserPermissions(User caller, UserPermission permission) throws IOException {
++    String userName = permission.getUser();
++    Permission perm = permission.getPermission();
++    if (perm instanceof TablePermission) {
++      TablePermission tablePermission = (TablePermission) permission.getPermission();
++      TableName table = tablePermission.getTableName();
++      byte[] cf = tablePermission.getFamily();
++      byte[] cq = tablePermission.getQualifier();
++      accessChecker.requirePermission(caller, "userPermissions", table, cf, cq, userName,
++        Action.ADMIN);
++    } else if (perm instanceof NamespacePermission) {
++      NamespacePermission namespacePermission = (NamespacePermission) permission.getPermission();
++      accessChecker.requireNamespacePermission(caller, "userPermissions",
++        namespacePermission.getNamespace(), userName, Action.ADMIN);
++    } else {
++      accessChecker.requirePermission(caller, "userPermissions", userName, Action.ADMIN);
++    }
++  }
++
++  @Override
++  public void preHasPermission(ObserverContext<MasterCoprocessorEnvironment> ctx, String userName,
++      TablePermission permission) throws IOException {
++    preHasPermission(getActiveUser(ctx), userName, permission);
++  }
++
++  private void preHasPermission(User caller, String userName, TablePermission tablePermission)
++      throws IOException {
++    TableName table = tablePermission.getTableName();
++    byte[] cf = tablePermission.getFamily();
++    byte[] cq = tablePermission.getQualifier();
++    if (!caller.getShortName().equals(userName)) {
++      // User should have admin privilege if checking permission for other users
++      accessChecker.requirePermission(caller, "hasPermission", table, cf, cq, userName,
++        Action.ADMIN);
++    } else {
++      // User don't need ADMIN privilege for self check.
++      // Setting action as null in AuthResult to display empty action in audit log
++      accessChecker.requirePermission(caller, "hasPermission", table, cf, cq, userName);
++    }
++  }
++
++  @Override
++  public void preCheckPermissions(ObserverContext<MasterCoprocessorEnvironment> ctx,
++      List<Permission> permissions) throws IOException {
++    preCheckPermissions(getActiveUser(ctx), permissions);
++  }
++
++  private void preCheckPermissions(User caller, List<Permission> permissions) throws IOException {
++    for (Permission permission : permissions) {
++      if (permission instanceof TablePermission) {
++        // Check table permissions
++        TablePermission tperm = (TablePermission) permission;
++        for (Permission.Action action : permission.getActions()) {
++          AuthResult result = accessChecker.permissionGranted("checkPermissions", caller, action,
++            tperm.getTableName(), tperm.getFamily(), tperm.getQualifier());
++          AccessChecker.logResult(result);
++          if (!result.isAllowed()) {
++            // Even if passive we need to throw an exception here, we support checking
++            // effective permissions, so throw unconditionally
++            throw new AccessDeniedException(
++                "Insufficient permissions (table=" + tperm.getTableName()
++                    + (tperm.getFamily() != null ? ", family: " + result.toFamilyString() : "")
++                    + ", action=" + action.toString() + ")");
++          }
++        }
++      } else {
++        // Check global permissions
++        for (Permission.Action action : permission.getActions()) {
++          AuthResult result;
++          if (getAuthManager().authorizeUserGlobal(caller, action)) {
++            result = AuthResult.allow("checkPermissions", "Global action allowed", caller, action,
++              null, null);
++          } else {
++            result = AuthResult.deny("checkPermissions", "Global action denied", caller, action,
++              null, null);
++          }
++          AccessChecker.logResult(result);
++          if (!result.isAllowed()) {
++            // Even if passive we need to throw an exception here, we support checking
++            // effective permissions, so throw unconditionally
++            throw new AccessDeniedException(
++                "Insufficient permissions (action=" + action.toString() + ")");
++          }
++        }
++      }
++    }
++  }
+ }
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/client/TestAsyncAccessControlAdminApi.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/client/TestAsyncAccessControlAdminApi.java
+new file mode 100644
+index 0000000..f28e0db
+--- /dev/null
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/client/TestAsyncAccessControlAdminApi.java
+@@ -0,0 +1,86 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hbase.client;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertTrue;
++import static org.junit.Assert.fail;
++
++import org.apache.hadoop.hbase.HBaseClassTestRule;
++import org.apache.hadoop.hbase.TableName;
++import org.apache.hadoop.hbase.security.access.AccessControlLists;
++import org.apache.hadoop.hbase.security.access.Permission;
++import org.apache.hadoop.hbase.security.access.SecureTestUtil;
++import org.apache.hadoop.hbase.security.access.TablePermission;
++import org.apache.hadoop.hbase.security.access.UserPermission;
++import org.apache.hadoop.hbase.testclassification.ClientTests;
++import org.apache.hadoop.hbase.testclassification.SmallTests;
++import org.junit.BeforeClass;
++import org.junit.ClassRule;
++import org.junit.Test;
++import org.junit.experimental.categories.Category;
++import org.junit.runner.RunWith;
++import org.junit.runners.Parameterized;
++
++import java.util.Arrays;
++import java.util.List;
++
++@RunWith(Parameterized.class)
++@Category({ ClientTests.class, SmallTests.class })
++public class TestAsyncAccessControlAdminApi extends TestAsyncAdminBase {
++
++  @ClassRule
++  public static final HBaseClassTestRule CLASS_RULE =
++      HBaseClassTestRule.forClass(TestAsyncAccessControlAdminApi.class);
++
++  @BeforeClass
++  public static void setUpBeforeClass() throws Exception {
++    SecureTestUtil.enableSecurity(TEST_UTIL.getConfiguration());
++    TEST_UTIL.startMiniCluster(1);
++    TEST_UTIL.waitTableAvailable(AccessControlLists.ACL_TABLE_NAME);
++    ASYNC_CONN = ConnectionFactory.createAsyncConnection(TEST_UTIL.getConfiguration()).get();
++  }
++
++  @Test
++  public void testGrant() throws Exception {
++    // grant
++    TableName tableName = TableName.valueOf("test-table");
++    String user = "test-user";
++    admin.grant(new UserPermission(user, new TablePermission(tableName, Permission.Action.READ)),
++      false).get();
++
++    // get user permissions
++    List<UserPermission> userPermissions =
++        admin.getUserPermissions(new UserPermission(user, new TablePermission(tableName))).get();
++    assertEquals(1, userPermissions.size());
++    Permission.Action[] actions = userPermissions.get(0).getPermission().getActions();
++    assertEquals(1, actions.length);
++    assertEquals(Permission.Action.READ, actions[0]);
++
++    // has permission
++    boolean hasPermission = admin.hasPermission(user, new TablePermission(tableName)).get();
++    assertTrue(hasPermission);
++
++    // check permissions
++    try {
++      admin.checkPermission(Arrays.asList(new TablePermission(tableName))).get();
++    } catch (Exception e) {
++      fail("should not come here");
++    }
++  }
++}
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/SecureTestUtil.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/SecureTestUtil.java
+index e392b3b..7f3fc55 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/SecureTestUtil.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/SecureTestUtil.java
+@@ -18,19 +18,20 @@
+ 
+ package org.apache.hadoop.hbase.security.access;
+ 
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.fail;
++
+ import java.io.IOException;
+ import java.lang.reflect.UndeclaredThrowableException;
+ import java.security.PrivilegedActionException;
+ import java.security.PrivilegedExceptionAction;
++import java.util.Arrays;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.Optional;
+ import java.util.concurrent.Callable;
+ import java.util.concurrent.CountDownLatch;
+ 
+-import com.google.protobuf.BlockingRpcChannel;
+-import com.google.protobuf.ServiceException;
+-
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.hbase.Coprocessor;
+ import org.apache.hadoop.hbase.HBaseTestingUtility;
+@@ -54,22 +55,15 @@ import org.apache.hadoop.hbase.coprocessor.MasterCoprocessorEnvironment;
+ import org.apache.hadoop.hbase.coprocessor.MasterObserver;
+ import org.apache.hadoop.hbase.coprocessor.ObserverContext;
+ import org.apache.hadoop.hbase.io.hfile.HFile;
+-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
+-import org.apache.hadoop.hbase.protobuf.generated.AccessControlProtos;
+-import org.apache.hadoop.hbase.protobuf.generated.AccessControlProtos.AccessControlService;
+-import org.apache.hadoop.hbase.protobuf.generated.AccessControlProtos.CheckPermissionsRequest;
+ import org.apache.hadoop.hbase.regionserver.HRegion;
+ import org.apache.hadoop.hbase.security.AccessDeniedException;
+ import org.apache.hadoop.hbase.security.User;
+-import org.apache.hadoop.hbase.security.access.Permission.Action;
+ import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
+ import org.apache.hbase.thirdparty.com.google.common.collect.Maps;
+ import org.apache.hadoop.hbase.util.JVMClusterUtil.RegionServerThread;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+-
+-import static org.junit.Assert.assertEquals;
+-import static org.junit.Assert.fail;
++import com.google.protobuf.ServiceException;
+ 
+ /**
+  * Utility methods for testing security
+@@ -138,30 +132,12 @@ public class SecureTestUtil {
+ 
+   public static void checkTablePerms(Configuration conf, TableName table, byte[] family, byte[] column,
+       Permission.Action... actions) throws IOException {
+-    Permission[] perms = new Permission[actions.length];
+-    for (int i = 0; i < actions.length; i++) {
+-      perms[i] = new TablePermission(table, family, column, actions[i]);
+-    }
+-
+-    checkTablePerms(conf, table, perms);
++    checkTablePerms(conf, new TablePermission(table, family, column, actions));
+   }
+ 
+-  public static void checkTablePerms(Configuration conf, TableName table, Permission... perms)
+-  throws IOException {
+-    CheckPermissionsRequest.Builder request = CheckPermissionsRequest.newBuilder();
+-    for (Permission p : perms) {
+-      request.addPermission(AccessControlUtil.toPermission(p));
+-    }
++  public static void checkTablePerms(Configuration conf, Permission... perms) throws IOException {
+     try (Connection connection = ConnectionFactory.createConnection(conf)) {
+-      try (Table acl = connection.getTable(table)) {
+-        AccessControlService.BlockingInterface protocol =
+-            AccessControlService.newBlockingStub(acl.coprocessorService(new byte[0]));
+-        try {
+-          protocol.checkPermissions(null, request.build());
+-        } catch (ServiceException se) {
+-          ProtobufUtil.toIOException(se);
+-        }
+-      }
++      connection.getAdmin().checkPermission(Arrays.asList(perms));
+     }
+   }
+ 
+@@ -201,6 +177,13 @@ public class SecureTestUtil {
+     }
+   }
+ 
++  public static void verifyAllowed(AccessTestAction action, int count, User... users)
++      throws Exception {
++    for (User user : users) {
++      verifyAllowed(user, action, count);
++    }
++  }
++
+   public static void verifyAllowed(User user, AccessTestAction action, int count) throws Exception {
+     try {
+       Object obj = user.runAs(action);
+@@ -717,56 +700,20 @@ public class SecureTestUtil {
+ 
+   public static void checkGlobalPerms(HBaseTestingUtility testUtil, Permission.Action... actions)
+       throws IOException {
+-    Permission[] perms = new Permission[actions.length];
+-    for (int i = 0; i < actions.length; i++) {
+-      perms[i] = new Permission(actions[i]);
+-    }
+-    CheckPermissionsRequest.Builder request = CheckPermissionsRequest.newBuilder();
+-    for (Action a : actions) {
+-      request.addPermission(AccessControlProtos.Permission.newBuilder()
+-          .setType(AccessControlProtos.Permission.Type.Global)
+-          .setGlobalPermission(
+-              AccessControlProtos.GlobalPermission.newBuilder()
+-                  .addAction(AccessControlUtil.toPermissionAction(a)).build()));
+-    }
+-    try(Connection conn = ConnectionFactory.createConnection(testUtil.getConfiguration());
+-        Table acl = conn.getTable(AccessControlLists.ACL_TABLE_NAME)) {
+-      BlockingRpcChannel channel = acl.coprocessorService(new byte[0]);
+-      AccessControlService.BlockingInterface protocol =
+-        AccessControlService.newBlockingStub(channel);
+-      try {
+-        protocol.checkPermissions(null, request.build());
+-      } catch (ServiceException se) {
+-        ProtobufUtil.toIOException(se);
+-      }
++    try (Connection conn = ConnectionFactory.createConnection(testUtil.getConfiguration())) {
++      conn.getAdmin().checkPermission(Lists.newArrayList(new GlobalPermission(actions)));
+     }
+   }
+ 
+   public static void checkTablePerms(HBaseTestingUtility testUtil, TableName table, byte[] family,
+       byte[] column, Permission.Action... actions) throws IOException {
+-    Permission[] perms = new Permission[actions.length];
+-    for (int i = 0; i < actions.length; i++) {
+-      perms[i] = new TablePermission(table, family, column, actions[i]);
+-    }
+-    checkTablePerms(testUtil, table, perms);
++    checkTablePerms(testUtil, new TablePermission(table, family, column, actions));
+   }
+ 
+-  public static void checkTablePerms(HBaseTestingUtility testUtil, TableName table,
+-      Permission... perms) throws IOException {
+-    CheckPermissionsRequest.Builder request = CheckPermissionsRequest.newBuilder();
+-    for (Permission p : perms) {
+-      request.addPermission(AccessControlUtil.toPermission(p));
+-    }
+-
+-    try(Connection conn = ConnectionFactory.createConnection(testUtil.getConfiguration());
+-        Table acl = conn.getTable(table)) {
+-      AccessControlService.BlockingInterface protocol =
+-        AccessControlService.newBlockingStub(acl.coprocessorService(new byte[0]));
+-      try {
+-        protocol.checkPermissions(null, request.build());
+-      } catch (ServiceException se) {
+-        ProtobufUtil.toIOException(se);
+-      }
++  public static void checkTablePerms(HBaseTestingUtility testUtil, Permission... perms)
++      throws IOException {
++    try (Connection conn = ConnectionFactory.createConnection(testUtil.getConfiguration())) {
++      conn.getAdmin().checkPermission(Arrays.asList(perms));
+     }
+   }
+ 
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestAccessController.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestAccessController.java
+index 5199550..d856b69 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestAccessController.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestAccessController.java
+@@ -183,6 +183,10 @@ public class TestAccessController extends SecureTestUtil {
+   private static User USER_NONE;
+   // user with admin rights on the column family
+   private static User USER_ADMIN_CF;
++  // user with namespace admin permission
++  private static User USER_NAMESPACE_ADMIN;
++  // user with namespace create permission
++  private static User USER_NAMESPACE_CREATE;
+ 
+   private static final String GROUP_ADMIN = "group_admin";
+   private static final String GROUP_CREATE = "group_create";
+@@ -256,6 +260,8 @@ public class TestAccessController extends SecureTestUtil {
+     USER_CREATE = User.createUserForTesting(conf, "tbl_create", new String[0]);
+     USER_NONE = User.createUserForTesting(conf, "nouser", new String[0]);
+     USER_ADMIN_CF = User.createUserForTesting(conf, "col_family_admin", new String[0]);
++    USER_NAMESPACE_ADMIN = User.createUserForTesting(conf, "ns_admin", new String[0]);
++    USER_NAMESPACE_CREATE = User.createUserForTesting(conf, "ns_create", new String[0]);
+ 
+     USER_GROUP_ADMIN =
+         User.createUserForTesting(conf, "user_group_admin", new String[] { GROUP_ADMIN });
+@@ -298,6 +304,11 @@ public class TestAccessController extends SecureTestUtil {
+       Permission.Action.READ,
+       Permission.Action.WRITE);
+ 
++    grantOnNamespace(TEST_UTIL, USER_NAMESPACE_ADMIN.getShortName(),
++      TEST_TABLE.getNamespaceAsString(), Action.ADMIN);
++    grantOnNamespace(TEST_UTIL, USER_NAMESPACE_CREATE.getShortName(),
++      TEST_TABLE.getNamespaceAsString(), Action.CREATE);
++
+     grantOnTable(TEST_UTIL, USER_RW.getShortName(),
+       TEST_TABLE, TEST_FAMILY, null,
+       Permission.Action.READ,
+@@ -339,6 +350,10 @@ public class TestAccessController extends SecureTestUtil {
+     // Clean the _acl_ table
+     try {
+       deleteTable(TEST_UTIL, TEST_TABLE);
++      revokeFromNamespace(TEST_UTIL, USER_NAMESPACE_ADMIN.getShortName(),
++        TEST_TABLE.getNamespaceAsString(), Action.ADMIN);
++      revokeFromNamespace(TEST_UTIL, USER_NAMESPACE_CREATE.getShortName(),
++        TEST_TABLE.getNamespaceAsString(), Action.CREATE);
+     } catch (TableNotFoundException ex) {
+       // Test deleted the table, no problem
+       LOG.info("Test deleted table " + TEST_TABLE);
+@@ -1193,12 +1208,9 @@ public class TestAccessController extends SecureTestUtil {
+     AccessTestAction getTablePermissionsAction = new AccessTestAction() {
+       @Override
+       public Object run() throws Exception {
+-        try(Connection conn = ConnectionFactory.createConnection(conf);
+-            Table acl = conn.getTable(AccessControlLists.ACL_TABLE_NAME)){
+-          BlockingRpcChannel service = acl.coprocessorService(TEST_TABLE.getName());
+-          AccessControlService.BlockingInterface protocol =
+-              AccessControlService.newBlockingStub(service);
+-          AccessControlUtil.getUserPermissions(null, protocol, TEST_TABLE);
++        try (Connection conn = ConnectionFactory.createConnection(conf)) {
++          conn.getAdmin()
++              .getUserPermissions(new UserPermission(null, new TablePermission(TEST_TABLE)));
+         }
+         return null;
+       }
+@@ -1207,12 +1219,8 @@ public class TestAccessController extends SecureTestUtil {
+     AccessTestAction getGlobalPermissionsAction = new AccessTestAction() {
+       @Override
+       public Object run() throws Exception {
+-        try(Connection conn = ConnectionFactory.createConnection(conf);
+-            Table acl = conn.getTable(AccessControlLists.ACL_TABLE_NAME)) {
+-          BlockingRpcChannel service = acl.coprocessorService(HConstants.EMPTY_START_ROW);
+-          AccessControlService.BlockingInterface protocol =
+-            AccessControlService.newBlockingStub(service);
+-          AccessControlUtil.getUserPermissions(null, protocol);
++        try (Connection conn = ConnectionFactory.createConnection(conf)) {
++          conn.getAdmin().getUserPermissions(new UserPermission(null, new GlobalPermission()));
+         }
+         return null;
+       }
+@@ -1682,16 +1690,8 @@ public class TestAccessController extends SecureTestUtil {
+     htd.setOwner(USER_OWNER);
+     createTable(TEST_UTIL, htd);
+     try {
+-      List<UserPermission> perms;
+-      Table acl = systemUserConnection.getTable(AccessControlLists.ACL_TABLE_NAME);
+-      try {
+-        BlockingRpcChannel service = acl.coprocessorService(tableName.getName());
+-        AccessControlService.BlockingInterface protocol =
+-            AccessControlService.newBlockingStub(service);
+-        perms = AccessControlUtil.getUserPermissions(null, protocol, tableName);
+-      } finally {
+-        acl.close();
+-      }
++      List<UserPermission> perms = systemUserConnection.getAdmin()
++          .getUserPermissions(new UserPermission(null, new TablePermission(tableName)));
+ 
+       UserPermission ownerperm =
+           new UserPermission(USER_OWNER.getName(), tableName, Action.values());
+@@ -1710,15 +1710,8 @@ public class TestAccessController extends SecureTestUtil {
+       grantOnTable(TEST_UTIL, user.getShortName(), tableName, family1, qualifier,
+         Permission.Action.READ);
+ 
+-      acl = systemUserConnection.getTable(AccessControlLists.ACL_TABLE_NAME);
+-      try {
+-        BlockingRpcChannel service = acl.coprocessorService(tableName.getName());
+-        AccessControlService.BlockingInterface protocol =
+-            AccessControlService.newBlockingStub(service);
+-        perms = AccessControlUtil.getUserPermissions(null, protocol, tableName);
+-      } finally {
+-        acl.close();
+-      }
++      perms = systemUserConnection.getAdmin()
++          .getUserPermissions(new UserPermission(null, new TablePermission(tableName)));
+ 
+       UserPermission upToVerify =
+           new UserPermission(userName, tableName, family1, qualifier, Permission.Action.READ);
+@@ -1734,15 +1727,8 @@ public class TestAccessController extends SecureTestUtil {
+       grantOnTable(TEST_UTIL, user.getShortName(), tableName, family1, qualifier,
+         Permission.Action.WRITE, Permission.Action.READ);
+ 
+-      acl = systemUserConnection.getTable(AccessControlLists.ACL_TABLE_NAME);
+-      try {
+-        BlockingRpcChannel service = acl.coprocessorService(tableName.getName());
+-        AccessControlService.BlockingInterface protocol =
+-            AccessControlService.newBlockingStub(service);
+-        perms = AccessControlUtil.getUserPermissions(null, protocol, tableName);
+-      } finally {
+-        acl.close();
+-      }
++      perms = systemUserConnection.getAdmin()
++          .getUserPermissions(new UserPermission(null, new TablePermission(tableName)));
+ 
+       upToVerify =
+           new UserPermission(userName, tableName, family1, qualifier, Permission.Action.WRITE,
+@@ -1754,15 +1740,8 @@ public class TestAccessController extends SecureTestUtil {
+       revokeFromTable(TEST_UTIL, user.getShortName(), tableName, family1, qualifier,
+         Permission.Action.WRITE, Permission.Action.READ);
+ 
+-      acl = systemUserConnection.getTable(AccessControlLists.ACL_TABLE_NAME);
+-      try {
+-        BlockingRpcChannel service = acl.coprocessorService(tableName.getName());
+-        AccessControlService.BlockingInterface protocol =
+-            AccessControlService.newBlockingStub(service);
+-        perms = AccessControlUtil.getUserPermissions(null, protocol, tableName);
+-      } finally {
+-        acl.close();
+-      }
++      perms = systemUserConnection.getAdmin()
++          .getUserPermissions(new UserPermission(null, new TablePermission(tableName)));
+ 
+       assertFalse("User should not be granted permission: " + upToVerify.toString(),
+         hasFoundUserPermission(upToVerify, perms));
+@@ -1774,15 +1753,8 @@ public class TestAccessController extends SecureTestUtil {
+       htd.setOwner(newOwner);
+       admin.modifyTable(tableName, htd);
+ 
+-      acl = systemUserConnection.getTable(AccessControlLists.ACL_TABLE_NAME);
+-      try {
+-        BlockingRpcChannel service = acl.coprocessorService(tableName.getName());
+-        AccessControlService.BlockingInterface protocol =
+-            AccessControlService.newBlockingStub(service);
+-        perms = AccessControlUtil.getUserPermissions(null, protocol, tableName);
+-      } finally {
+-        acl.close();
+-      }
++      perms = systemUserConnection.getAdmin()
++          .getUserPermissions(new UserPermission(null, new TablePermission(tableName)));
+ 
+       UserPermission newOwnerperm =
+           new UserPermission(newOwner.getName(), tableName, Action.values());
+@@ -1796,16 +1768,8 @@ public class TestAccessController extends SecureTestUtil {
+ 
+   @Test
+   public void testGlobalPermissionList() throws Exception {
+-    List<UserPermission> perms;
+-    Table acl = systemUserConnection.getTable(AccessControlLists.ACL_TABLE_NAME);
+-    try {
+-      BlockingRpcChannel service = acl.coprocessorService(HConstants.EMPTY_START_ROW);
+-      AccessControlService.BlockingInterface protocol =
+-        AccessControlService.newBlockingStub(service);
+-      perms = AccessControlUtil.getUserPermissions(null, protocol);
+-    } finally {
+-      acl.close();
+-    }
++    List<UserPermission> perms = systemUserConnection.getAdmin()
++        .getUserPermissions(new UserPermission(null, new GlobalPermission()));
+ 
+     Collection<String> superUsers = Superusers.getSuperUsers();
+     List<UserPermission> adminPerms = new ArrayList<>(superUsers.size() + 1);
+@@ -1899,7 +1863,7 @@ public class TestAccessController extends SecureTestUtil {
+       AccessTestAction multiQualifierRead = new AccessTestAction() {
+         @Override
+         public Void run() throws Exception {
+-          checkTablePerms(TEST_UTIL, TEST_TABLE, new Permission[] {
++          checkTablePerms(TEST_UTIL, new Permission[] {
+               new TablePermission(TEST_TABLE, TEST_FAMILY, TEST_Q1, Permission.Action.READ),
+               new TablePermission(TEST_TABLE, TEST_FAMILY, TEST_Q2, Permission.Action.READ), });
+           return null;
+@@ -1909,7 +1873,7 @@ public class TestAccessController extends SecureTestUtil {
+       AccessTestAction globalAndTableRead = new AccessTestAction() {
+         @Override
+         public Void run() throws Exception {
+-          checkTablePerms(TEST_UTIL, TEST_TABLE, new Permission[] {
++          checkTablePerms(TEST_UTIL, new Permission[] {
+               new Permission(Permission.Action.READ),
+               new TablePermission(TEST_TABLE, null, (byte[]) null, Permission.Action.READ), });
+           return null;
+@@ -1919,7 +1883,7 @@ public class TestAccessController extends SecureTestUtil {
+       AccessTestAction noCheck = new AccessTestAction() {
+         @Override
+         public Void run() throws Exception {
+-          checkTablePerms(TEST_UTIL, TEST_TABLE, new Permission[0]);
++          checkTablePerms(TEST_UTIL, new Permission[0]);
+           return null;
+         }
+       };
+@@ -1956,17 +1920,12 @@ public class TestAccessController extends SecureTestUtil {
+ 
+       // --------------------------------------
+       // check for wrong table region
+-      CheckPermissionsRequest checkRequest =
+-          CheckPermissionsRequest
+-              .newBuilder()
+-              .addPermission(
+-                AccessControlProtos.Permission
+-                    .newBuilder()
+-                    .setType(AccessControlProtos.Permission.Type.Table)
+-                    .setTablePermission(
+-                      AccessControlProtos.TablePermission.newBuilder()
+-                          .setTableName(ProtobufUtil.toProtoTableName(TEST_TABLE))
+-                          .addAction(AccessControlProtos.Permission.Action.CREATE))).build();
++      CheckPermissionsRequest checkRequest = CheckPermissionsRequest.newBuilder()
++          .addPermission(AccessControlProtos.Permission.newBuilder()
++              .setType(AccessControlProtos.Permission.Type.Table)
++              .setTablePermission(AccessControlProtos.TablePermission.newBuilder()
++                  .setTableName(ProtobufUtil.toProtoTableName(TEST_TABLE))
++                  .addAction(AccessControlProtos.Permission.Action.CREATE))).build();
+       Table acl = systemUserConnection.getTable(AccessControlLists.ACL_TABLE_NAME);
+       try {
+         BlockingRpcChannel channel = acl.coprocessorService(new byte[0]);
+@@ -2804,7 +2763,7 @@ public class TestAccessController extends SecureTestUtil {
+     getNamespacePermissionsAndVerify(namespace, 1, namespace);
+ 
+     // Test 2: '@.*'
+-    getNamespacePermissionsAndVerify(".*", 1, namespace);
++    getNamespacePermissionsAndVerify("t.*", 1, namespace);
+ 
+     // Test 3: A more complex regex
+     getNamespacePermissionsAndVerify("^test[a-zA-Z]*", 1, namespace);
+@@ -3389,6 +3348,26 @@ public class TestAccessController extends SecureTestUtil {
+       AccessTestAction hasPermissionAction = new AccessTestAction() {
+         @Override
+         public Object run() throws Exception {
++          try (Connection conn = ConnectionFactory.createConnection(conf)) {
++            try {
++              Permission.Action[] actions = { Permission.Action.READ, Permission.Action.WRITE };
++              AccessControlClient.hasPermission(conn, TEST_TABLE.getNameAsString(), TEST_FAMILY,
++                HConstants.EMPTY_BYTE_ARRAY, "dummy", actions);
++            } catch (Throwable e) {
++              throw new ServiceException(e);
++            }
++          }
++          return null;
++        }
++      };
++      verifyAllowed(hasPermissionAction, SUPERUSER, USER_ADMIN, USER_GROUP_ADMIN, USER_OWNER,
++        USER_ADMIN_CF, user1);
++      verifyDenied(hasPermissionAction, USER_CREATE, USER_RW, USER_RO, USER_NONE, user2);
++
++      // Verify action privilege
++      AccessTestAction hasPermissionActionCP = new AccessTestAction() {
++        @Override
++        public Object run() throws Exception {
+           try (Connection conn = ConnectionFactory.createConnection(conf);
+               Table acl = conn.getTable(AccessControlLists.ACL_TABLE_NAME)) {
+             BlockingRpcChannel service = acl.coprocessorService(TEST_TABLE.getName());
+@@ -3401,9 +3380,9 @@ public class TestAccessController extends SecureTestUtil {
+           return null;
+         }
+       };
+-      verifyAllowed(hasPermissionAction, SUPERUSER, USER_ADMIN, USER_GROUP_ADMIN, USER_OWNER,
++      verifyAllowed(hasPermissionActionCP, SUPERUSER, USER_ADMIN, USER_GROUP_ADMIN, USER_OWNER,
+         USER_ADMIN_CF, user1);
+-      verifyDenied(hasPermissionAction, USER_CREATE, USER_RW, USER_RO, USER_NONE, user2);
++      verifyDenied(hasPermissionActionCP, USER_CREATE, USER_RW, USER_RO, USER_NONE, user2);
+ 
+       // Check for global user
+       assertTrue(AccessControlClient.hasPermission(conn, TEST_TABLE.getNameAsString(),
+@@ -3517,6 +3496,173 @@ public class TestAccessController extends SecureTestUtil {
+     verifyDenied(action, USER_CREATE, USER_RW, USER_RO, USER_NONE, USER_OWNER);
+   }
+ 
++  @Test
++  public void testGetUserPermissionsResult() throws Exception {
++    User[] allowedGlobalUsers = new User[] { SUPERUSER, USER_ADMIN, USER_GROUP_ADMIN };
++    User[] deniedGlobalUsers =
++        new User[] { USER_NAMESPACE_ADMIN, USER_NAMESPACE_CREATE, USER_CREATE, USER_OWNER, USER_RW,
++            USER_RO, USER_NONE, USER_GROUP_READ, USER_GROUP_WRITE, USER_GROUP_CREATE };
++    // get all global permissions
++    checkGetUserPermissions(new UserPermission(null, new GlobalPermission()), 12,
++      allowedGlobalUsers, deniedGlobalUsers);
++    // get user with global permissions
++    checkGetUserPermissions(new UserPermission(USER_ADMIN.getShortName(), new GlobalPermission()),
++      1, allowedGlobalUsers, deniedGlobalUsers);
++    // get user without global permissions
++    checkGetUserPermissions(new UserPermission(USER_CREATE.getShortName(), new GlobalPermission()),
++      0, allowedGlobalUsers, deniedGlobalUsers);
++
++    User[] allowedNsUsers =
++        new User[] { SUPERUSER, USER_ADMIN, USER_GROUP_ADMIN, USER_NAMESPACE_ADMIN };
++    User[] deniedNsUsers = new User[] { USER_NAMESPACE_CREATE, USER_NAMESPACE_CREATE,
++        USER_NAMESPACE_CREATE, USER_OWNER, USER_CREATE, USER_RW, USER_RO, USER_NONE,
++        USER_GROUP_READ, USER_GROUP_WRITE, USER_GROUP_CREATE };
++    // get all namespace permissions
++    checkGetUserPermissions(
++      new UserPermission(null, new NamespacePermission(TEST_TABLE.getNamespaceAsString())), 2,
++      allowedNsUsers, deniedNsUsers);
++    // get user with namespace permissions
++    checkGetUserPermissions(
++      new UserPermission(USER_NAMESPACE_CREATE.getShortName(),
++          new NamespacePermission(TEST_TABLE.getNamespaceAsString())),
++      1, allowedNsUsers, deniedNsUsers);
++    // get user without namespace permissions
++    checkGetUserPermissions(
++      new UserPermission(SUPERUSER.getShortName(),
++          new NamespacePermission(TEST_TABLE.getNamespaceAsString())),
++      0, allowedNsUsers, deniedNsUsers);
++
++    User[] allowedTableUsers =
++        new User[] { SUPERUSER, USER_ADMIN, USER_OWNER, USER_GROUP_ADMIN, USER_NAMESPACE_ADMIN };
++    User[] deniedTableUsers = new User[] { USER_NAMESPACE_CREATE, USER_CREATE, USER_RW, USER_RO,
++        USER_NONE, USER_GROUP_READ, USER_GROUP_WRITE, USER_GROUP_CREATE };
++    // get all table permissions
++    checkGetUserPermissions(new UserPermission(null, new TablePermission(TEST_TABLE)), 5,
++      allowedTableUsers, deniedTableUsers);
++    // get table family permissions
++    byte[] actions = null;
++    checkGetUserPermissions(
++      new UserPermission(null, new TablePermission(TEST_TABLE, TEST_FAMILY, actions)), 3,
++      allowedTableUsers, deniedTableUsers);
++    // get user with table permissions
++    checkGetUserPermissions(
++      new UserPermission(USER_ADMIN_CF.getShortName(), new TablePermission(TEST_TABLE)), 1,
++      allowedTableUsers, deniedTableUsers);
++    // get user without table permissions
++    checkGetUserPermissions(
++      new UserPermission(USER_ADMIN_CF.getShortName(), new TablePermission(TEST_TABLE)), 0,
++      allowedTableUsers, deniedTableUsers);
++    // get user with table family permissions
++    checkGetUserPermissions(
++      new UserPermission(USER_RO.getShortName(),
++          new TablePermission(TEST_TABLE, TEST_FAMILY, actions)),
++      1, allowedTableUsers, deniedTableUsers);
++    // get user without table family permissions
++    checkGetUserPermissions(
++      new UserPermission(USER_CREATE.getShortName(),
++          new TablePermission(TEST_TABLE, TEST_FAMILY, actions)),
++      0, allowedTableUsers, deniedTableUsers);
++
++    // get global permissions in regex
++    checkGetUserPermissions(getPrivilegedAction(null), 12, allowedGlobalUsers, deniedGlobalUsers);
++    // get namespace permissions in regex
++    checkGetUserPermissions(getPrivilegedAction("@.*"), 2, allowedNsUsers, deniedNsUsers);
++    // get table permissions in regex
++    checkGetUserPermissions(getPrivilegedAction("te.*"), 5, allowedTableUsers, deniedTableUsers);
++
++    // check table name is null
++    try {
++      checkGetUserPermissions(new UserPermission(null, new TablePermission(null)), 5,
++        allowedTableUsers, deniedTableUsers);
++      fail("should not come here");
++    } catch (IllegalStateException e) {
++      // expected
++    }
++    // check namespace is null
++    try {
++      checkGetUserPermissions(new UserPermission(null, new NamespacePermission(null)), 2,
++        allowedNsUsers, deniedNsUsers);
++      fail("should not come here");
++    } catch (IllegalStateException e) {
++      // expected
++    }
++
++    // get global permissions cp
++    AccessTestAction getGlobalPermAction = new AccessTestAction() {
++      @Override
++      public Object run() throws Exception {
++        try (Connection conn = ConnectionFactory.createConnection(conf);
++            Table acl = conn.getTable(AccessControlLists.ACL_TABLE_NAME)) {
++          BlockingRpcChannel service = acl.coprocessorService(TEST_TABLE.getName());
++          AccessControlService.BlockingInterface protocol =
++              AccessControlService.newBlockingStub(service);
++          AccessControlUtil.getUserPermissions(null, protocol);
++        }
++        return null;
++      }
++    };
++    verifyAllowed(getGlobalPermAction, 12, allowedGlobalUsers);
++    verifyDenied(getGlobalPermAction, deniedGlobalUsers);
++    // get namespace permissions
++    AccessTestAction getNsPermAction = new AccessTestAction() {
++      @Override
++      public Object run() throws Exception {
++        try (Connection conn = ConnectionFactory.createConnection(conf);
++            Table acl = conn.getTable(AccessControlLists.ACL_TABLE_NAME)) {
++          BlockingRpcChannel service = acl.coprocessorService(TEST_TABLE.getName());
++          AccessControlService.BlockingInterface protocol =
++              AccessControlService.newBlockingStub(service);
++          AccessControlUtil.getUserPermissions(null, protocol, TEST_TABLE.getNamespace());
++        }
++        return null;
++      }
++    };
++    verifyAllowed(getNsPermAction, 2, allowedNsUsers);
++    verifyDenied(getNsPermAction, deniedNsUsers);
++    // get user table family permissions in CP
++    AccessTestAction getUserTableColumnPermAction = new AccessTestAction() {
++      @Override
++      public Object run() throws Exception {
++        try (Connection conn = ConnectionFactory.createConnection(conf);
++            Table acl = conn.getTable(AccessControlLists.ACL_TABLE_NAME)) {
++          BlockingRpcChannel service = acl.coprocessorService(TEST_TABLE.getName());
++          AccessControlService.BlockingInterface protocol =
++              AccessControlService.newBlockingStub(service);
++          AccessControlUtil.getUserPermissions(null, protocol, TEST_TABLE, TEST_FAMILY, null,
++            USER_RO.getShortName());
++        }
++        return null;
++      }
++    };
++    verifyAllowed(getUserTableColumnPermAction, 1, allowedTableUsers);
++    verifyDenied(getUserTableColumnPermAction, deniedTableUsers);
++  }
++
++  private void checkGetUserPermissions(PrivilegedAction<List<UserPermission>> action, int count,
++      User[] allowedUsers, User[] deniedUsers) {
++    for (User allowedUser : allowedUsers) {
++      assertEquals(count, allowedUser.runAs(action).size());
++    }
++    for (User deniedUser : deniedUsers) {
++      List<UserPermission> userPermissions = deniedUser.runAs(action);
++      assertTrue(userPermissions == null || userPermissions.size() == 0);
++    }
++  }
++
++  private void checkGetUserPermissions(UserPermission userPermission, int count,
++      User[] allowedUsers, User[] deniedUsers) throws Exception {
++    AccessTestAction action = new AccessTestAction() {
++      @Override
++      public Object run() throws Exception {
++        try (Connection conn = ConnectionFactory.createConnection(conf)) {
++          return conn.getAdmin().getUserPermissions(userPermission).size();
++        }
++      }
++    };
++    verifyAllowed(action, count, allowedUsers);
++    verifyDenied(action, deniedUsers);
++  }
++
+   /*
+    * Validate Global User ACL
+    */
+@@ -3527,12 +3673,8 @@ public class TestAccessController extends SecureTestUtil {
+     AccessTestAction globalUserPermissionAction = new AccessTestAction() {
+       @Override
+       public Object run() throws Exception {
+-        try (Connection conn = ConnectionFactory.createConnection(conf);
+-            Table acl = conn.getTable(AccessControlLists.ACL_TABLE_NAME)) {
+-          BlockingRpcChannel service = acl.coprocessorService(TEST_TABLE.getName());
+-          AccessControlService.BlockingInterface protocol =
+-              AccessControlService.newBlockingStub(service);
+-          AccessControlUtil.getUserPermissions(null, protocol, "dummy");
++        try (Connection conn = ConnectionFactory.createConnection(conf)) {
++          conn.getAdmin().getUserPermissions(new UserPermission("dummy", new GlobalPermission()));
+         }
+         return null;
+       }
+@@ -3566,12 +3708,9 @@ public class TestAccessController extends SecureTestUtil {
+     AccessTestAction namespaceUserPermissionAction = new AccessTestAction() {
+       @Override
+       public Object run() throws Exception {
+-        try (Connection conn = ConnectionFactory.createConnection(conf);
+-            Table acl = conn.getTable(AccessControlLists.ACL_TABLE_NAME)) {
+-          BlockingRpcChannel service = acl.coprocessorService(TEST_TABLE.getName());
+-          AccessControlService.BlockingInterface protocol =
+-              AccessControlService.newBlockingStub(service);
+-          AccessControlUtil.getUserPermissions(null, protocol, Bytes.toBytes(namespace1), "dummy");
++        try (Connection conn = ConnectionFactory.createConnection(conf)) {
++          conn.getAdmin()
++              .getUserPermissions(new UserPermission("dummy", new NamespacePermission(namespace1)));
+         }
+         return null;
+       }
+@@ -3610,13 +3749,10 @@ public class TestAccessController extends SecureTestUtil {
+     AccessTestAction tableUserPermissionAction = new AccessTestAction() {
+       @Override
+       public Object run() throws Exception {
+-        try (Connection conn = ConnectionFactory.createConnection(conf);
+-            Table acl = conn.getTable(AccessControlLists.ACL_TABLE_NAME)) {
+-          BlockingRpcChannel service = acl.coprocessorService(TEST_TABLE.getName());
+-          AccessControlService.BlockingInterface protocol =
+-              AccessControlService.newBlockingStub(service);
+-          AccessControlUtil.getUserPermissions(null, protocol, TEST_TABLE, TEST_FAMILY,
+-            TEST_QUALIFIER, "dummy");
++        try (Connection conn = ConnectionFactory.createConnection(conf)) {
++          byte[] action = null;
++          conn.getAdmin().getUserPermissions(new UserPermission("dummy",
++              new TablePermission(TEST_TABLE, TEST_FAMILY, TEST_QUALIFIER, action)));
+         }
+         return null;
+       }
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestNamespaceCommands.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestNamespaceCommands.java
+index fa8543e..302cd66 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestNamespaceCommands.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestNamespaceCommands.java
+@@ -406,12 +406,9 @@ public class TestNamespaceCommands extends SecureTestUtil {
+     AccessTestAction getPermissionsAction = new AccessTestAction() {
+       @Override
+       public Object run() throws Exception {
+-        try (Connection connection = ConnectionFactory.createConnection(conf);
+-            Table acl = connection.getTable(AccessControlLists.ACL_TABLE_NAME)) {
+-          BlockingRpcChannel service = acl.coprocessorService(HConstants.EMPTY_START_ROW);
+-          AccessControlService.BlockingInterface protocol =
+-              AccessControlService.newBlockingStub(service);
+-          AccessControlUtil.getUserPermissions(null, protocol, Bytes.toBytes(TEST_NAMESPACE));
++        try (Connection connection = ConnectionFactory.createConnection(conf)) {
++          connection.getAdmin().getUserPermissions(
++            new UserPermission(null, new NamespacePermission(TEST_NAMESPACE)));
+         }
+         return null;
+       }
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestWithDisabledAuthorization.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestWithDisabledAuthorization.java
+index 67c43ee..ce9657e 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestWithDisabledAuthorization.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestWithDisabledAuthorization.java
+@@ -381,11 +381,12 @@ public class TestWithDisabledAuthorization extends SecureTestUtil {
+     AccessTestAction checkMultiQualifierRead = new AccessTestAction() {
+       @Override
+       public Void run() throws Exception {
+-        checkTablePerms(TEST_UTIL, TEST_TABLE.getTableName(), new Permission[] {
+-          new TablePermission(TEST_TABLE.getTableName(), TEST_FAMILY, TEST_Q1,
+-            Permission.Action.READ),
+-          new TablePermission(TEST_TABLE.getTableName(), TEST_FAMILY, TEST_Q2,
+-            Permission.Action.READ), });
++        checkTablePerms(TEST_UTIL,
++          new Permission[] {
++            new TablePermission(TEST_TABLE.getTableName(), TEST_FAMILY, TEST_Q1,
++                Permission.Action.READ),
++            new TablePermission(TEST_TABLE.getTableName(), TEST_FAMILY, TEST_Q2,
++                Permission.Action.READ), });
+         return null;
+       }
+     };
+@@ -397,11 +398,12 @@ public class TestWithDisabledAuthorization extends SecureTestUtil {
+     AccessTestAction checkMultiQualifierReadWrite = new AccessTestAction() {
+       @Override
+       public Void run() throws Exception {
+-        checkTablePerms(TEST_UTIL, TEST_TABLE.getTableName(), new Permission[] {
++        checkTablePerms(TEST_UTIL,
++          new Permission[] {
+             new TablePermission(TEST_TABLE.getTableName(), TEST_FAMILY, TEST_Q1,
+-              Permission.Action.READ, Permission.Action.WRITE),
++                Permission.Action.READ, Permission.Action.WRITE),
+             new TablePermission(TEST_TABLE.getTableName(), TEST_FAMILY, TEST_Q2,
+-              Permission.Action.READ, Permission.Action.WRITE), });
++                Permission.Action.READ, Permission.Action.WRITE), });
+         return null;
+       }
+     };
+diff --git a/hbase-thrift/src/main/java/org/apache/hadoop/hbase/thrift2/client/ThriftAdmin.java b/hbase-thrift/src/main/java/org/apache/hadoop/hbase/thrift2/client/ThriftAdmin.java
+index 5d550c6..920de70 100644
+--- a/hbase-thrift/src/main/java/org/apache/hadoop/hbase/thrift2/client/ThriftAdmin.java
++++ b/hbase-thrift/src/main/java/org/apache/hadoop/hbase/thrift2/client/ThriftAdmin.java
+@@ -60,6 +60,8 @@ import org.apache.hadoop.hbase.replication.ReplicationException;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerDescription;
+ import org.apache.hadoop.hbase.replication.SyncReplicationState;
++import org.apache.hadoop.hbase.security.access.Permission;
++import org.apache.hadoop.hbase.security.access.TablePermission;
+ import org.apache.hadoop.hbase.security.access.UserPermission;
+ import org.apache.hadoop.hbase.thrift2.ThriftUtilities;
+ import org.apache.hadoop.hbase.thrift2.generated.TColumnFamilyDescriptor;
+@@ -1436,4 +1438,19 @@ public class ThriftAdmin implements Admin {
+   public void revoke(UserPermission userPermission) {
+     throw new NotImplementedException("revoke not supported in ThriftAdmin");
+   }
++
++  @Override
++  public List<UserPermission> getUserPermissions(UserPermission userPermission) {
++    throw new NotImplementedException("getUserPermissions not supported in ThriftAdmin");
++  }
++
++  @Override
++  public boolean hasPermission(String userName, TablePermission tablePermission) {
++    throw new NotImplementedException("hasPermission not supported in ThriftAdmin");
++  }
++
++  @Override
++  public void checkPermission(List<Permission> permissions) {
++    throw new NotImplementedException("checkPermission not supported in ThriftAdmin");
++  }
+ }
+-- 
+2.7.4

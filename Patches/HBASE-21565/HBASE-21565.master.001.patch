@@ -1,0 +1,166 @@
+From def9e4adbf1603a1aeabec4e0f733bd8467e5a3a Mon Sep 17 00:00:00 2001
+From: Jingyun Tian <tianjy1990@gmail.com>
+Date: Fri, 7 Dec 2018 18:25:46 +0800
+Subject: [PATCH] HBASE-21565 Delete dead server from dead server list too
+ early leads to concurrent Server Crash Procedures(SCP) for a same server
+
+---
+ .../org/apache/hadoop/hbase/master/DeadServer.java | 21 +++++-----
+ .../apache/hadoop/hbase/HBaseTestingUtility.java   |  7 +++-
+ .../hadoop/hbase/master/TestRestartCluster.java    | 47 ++++++++++++++++++++++
+ 3 files changed, 64 insertions(+), 11 deletions(-)
+
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/DeadServer.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/DeadServer.java
+index 4183201..98ab775 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/DeadServer.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/DeadServer.java
+@@ -75,12 +75,12 @@ public class DeadServer {
+       ServerName sn = it.next();
+       if (ServerName.isSameAddress(sn, newServerName)) {
+         // remove from deadServers
+-        it.remove();
+-        // remove from processingServers
+-        boolean removed = processingServers.remove(sn);
+-        if (removed) {
+-          LOG.debug("Removed " + sn + " ; numProcessing=" + processingServers.size());
++        if(processingServers.contains(sn)){
++          LOG.info("There is a SCP that currently working on this server {}", sn);
++          continue;
+         }
++        it.remove();
++        LOG.info("Removed server {} from dead server list", sn);
+         return true;
+       }
+     }
+@@ -155,6 +155,7 @@ public class DeadServer {
+    */
+   public synchronized void finish(ServerName sn) {
+     boolean removed = processingServers.remove(sn);
++    removeDeadServer(sn);
+     if (LOG.isDebugEnabled()) {
+       LOG.debug("Finished processing " + sn + "; numProcessing=" + processingServers.size());
+       if (removed) {
+@@ -177,12 +178,12 @@ public class DeadServer {
+       ServerName sn = it.next();
+       if (ServerName.isSameAddress(sn, newServerName)) {
+         // remove from deadServers
+-        it.remove();
+-        // remove from processingServers
+-        boolean removed = processingServers.remove(sn);
+-        if (removed) {
+-          LOG.debug("Removed " + sn + " ; numProcessing=" + processingServers.size());
++        if(processingServers.contains(sn)){
++          LOG.info("there is a SCP that currently working on this server {}", sn);
++          continue;
+         }
++        it.remove();
++        LOG.info("Removed server {} from dead server list", sn);
+       }
+     }
+   }
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/HBaseTestingUtility.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/HBaseTestingUtility.java
+index 31a7cad..bb06b68 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/HBaseTestingUtility.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/HBaseTestingUtility.java
+@@ -1185,6 +1185,11 @@ public class HBaseTestingUtility extends HBaseZKTestingUtility {
+    * @param servers number of region servers
+    */
+   public void restartHBaseCluster(int servers) throws IOException, InterruptedException {
++    this.restartHBaseCluster(servers, null);
++  }
++
++  public void restartHBaseCluster(int servers, List<Integer> ports)
++      throws IOException, InterruptedException {
+     if (hbaseAdmin != null) {
+       hbaseAdmin.close();
+       hbaseAdmin = null;
+@@ -1193,7 +1198,7 @@ public class HBaseTestingUtility extends HBaseZKTestingUtility {
+       this.connection.close();
+       this.connection = null;
+     }
+-    this.hbaseCluster = new MiniHBaseCluster(this.conf, servers);
++    this.hbaseCluster = new MiniHBaseCluster(this.conf, 1, servers, ports, null, null);
+     // Don't leave here till we've done a successful scan of the hbase:meta
+     Connection conn = ConnectionFactory.createConnection(this.conf);
+     Table t = conn.getTable(TableName.META_TABLE_NAME);
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/master/TestRestartCluster.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/master/TestRestartCluster.java
+index 4ba1876..d076054 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/master/TestRestartCluster.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/master/TestRestartCluster.java
+@@ -24,6 +24,8 @@ import static org.junit.Assert.assertTrue;
+ import java.io.IOException;
+ import java.util.List;
+ import java.util.Map;
++import java.util.stream.Collectors;
++
+ import org.apache.hadoop.hbase.HBaseClassTestRule;
+ import org.apache.hadoop.hbase.HBaseTestingUtility;
+ import org.apache.hadoop.hbase.HConstants;
+@@ -32,13 +34,17 @@ import org.apache.hadoop.hbase.MiniHBaseCluster;
+ import org.apache.hadoop.hbase.ServerName;
+ import org.apache.hadoop.hbase.TableExistsException;
+ import org.apache.hadoop.hbase.TableName;
++import org.apache.hadoop.hbase.Waiter;
+ import org.apache.hadoop.hbase.client.RegionInfo;
++import org.apache.hadoop.hbase.client.Table;
++import org.apache.hadoop.hbase.master.procedure.ServerCrashProcedure;
+ import org.apache.hadoop.hbase.testclassification.LargeTests;
+ import org.apache.hadoop.hbase.testclassification.MasterTests;
+ import org.apache.hadoop.hbase.util.Bytes;
+ import org.apache.hadoop.hbase.util.JVMClusterUtil;
+ import org.apache.hadoop.hbase.util.Threads;
+ import org.junit.After;
++import org.junit.Assert;
+ import org.junit.ClassRule;
+ import org.junit.Test;
+ import org.junit.experimental.categories.Category;
+@@ -67,6 +73,47 @@ public class TestRestartCluster {
+   }
+ 
+   @Test
++  public void testClusterRestartFailOver() throws Exception {
++    UTIL.startMiniCluster(3);
++    while (!UTIL.getMiniHBaseCluster().getMaster().isInitialized()) {
++      Threads.sleep(1);
++    }
++    TableName tableName = TABLES[0];
++    ServerName testServer = UTIL.getHBaseCluster().getRegionServer(0).getServerName();
++    UTIL.createMultiRegionTable(tableName, FAMILY);
++    UTIL.waitTableEnabled(tableName);
++    Table table = UTIL.getConnection().getTable(tableName);
++
++    for(int i=0; i < 100; i++) {
++      UTIL.loadTable(table, FAMILY);
++    }
++
++    List<Integer> ports =
++        UTIL.getHBaseCluster().getMaster().getServerManager().getOnlineServersList().stream()
++            .map(serverName -> serverName.getPort()).collect(Collectors.toList());
++    LOG.info("Shutting down cluster");
++    UTIL.shutdownMiniHBaseCluster();
++
++    LOG.info("Sleeping a bit");
++    Thread.sleep(2000);
++
++    LOG.info("Starting cluster the second time");
++    UTIL.restartHBaseCluster(3, ports);
++    Waiter.waitFor(UTIL.getConfiguration(), 10000,
++      () -> UTIL.getHBaseCluster().getMaster().isInitialized());
++    Thread.sleep(500);
++    LOG.info("start to find the procedure of SCP for the severName we choose");
++    Waiter.waitFor(UTIL.getConfiguration(), 20000,
++      () -> UTIL.getHBaseCluster().getMaster().getProcedures().stream()
++          .anyMatch(procedure -> (procedure instanceof ServerCrashProcedure)
++              && ((ServerCrashProcedure) procedure).getServerName().compareTo(testServer) == 0));
++    LOG.info("start to submit the SCP for the same serverName {} which should fail", testServer);
++    Assert.assertFalse(
++      UTIL.getHBaseCluster().getMaster().getServerManager().expireServer(testServer));
++    Thread.sleep(20000);
++  }
++
++  @Test
+   public void testClusterRestart() throws Exception {
+     UTIL.startMiniCluster(3);
+     while (!UTIL.getMiniHBaseCluster().getMaster().isInitialized()) {
+-- 
+2.7.4

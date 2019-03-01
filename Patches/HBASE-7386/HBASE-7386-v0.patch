@@ -1,0 +1,98 @@
+diff --git bin/hbase-daemon.sh bin/hbase-daemon.sh
+index 21b73b2..289a5a0 100755
+--- bin/hbase-daemon.sh
++++ bin/hbase-daemon.sh
+@@ -71,19 +71,6 @@ hbase_rotate_log ()
+     fi
+ }
+ 
+-cleanZNode() {
+-  if [ -f $HBASE_ZNODE_FILE ]; then
+-    if [ "$command" = "master" ]; then
+-      $bin/hbase master clear > /dev/null 2>&1
+-    else
+-      #call ZK to delete the node
+-      ZNODE=`cat $HBASE_ZNODE_FILE`
+-      $bin/hbase zkcli delete $ZNODE > /dev/null 2>&1
+-    fi
+-    rm $HBASE_ZNODE_FILE
+-  fi
+-}
+-
+ check_before_start(){
+     #ckeck if the process is not running
+     mkdir -p "$HBASE_PID_DIR"
+@@ -160,35 +147,26 @@ if [ "$HBASE_NICENESS" = "" ]; then
+     export HBASE_NICENESS=0
+ fi
+ 
+-thiscmd=$0
+-args=$@
+-
+ case $startStop in
+ 
+ (start)
+     check_before_start
+-    nohup $thiscmd --config "${HBASE_CONF_DIR}" internal_start $command $args < /dev/null > /dev/null 2>&1  &
+-  ;;
+-
+-(autorestart)
+-    check_before_start
+-    nohup $thiscmd --config "${HBASE_CONF_DIR}" internal_autorestart $command $args < /dev/null > /dev/null 2>&1  &
+-  ;;
+-
+-(internal_start)
+     hbase_rotate_log $logout
+     hbase_rotate_log $loggc
+     echo starting $command, logging to $logout
+     # Add to the command log file vital stats on our environment.
+     echo "`date` Starting $command on `hostname`" >> $loglog
+     echo "`ulimit -a`" >> $loglog 2>&1
+-    nice -n $HBASE_NICENESS "$HBASE_HOME"/bin/hbase \
++    nohup nice -n $HBASE_NICENESS "$HBASE_HOME"/bin/hbase \
+         --config "${HBASE_CONF_DIR}" \
+-        $command "$@" start > "$logout"  &
++        $command "$@" start > "$logout"  2>&1 < /dev/null &
+     echo $! > $pid
+     sleep 1; head "$logout"
+-    wait
+-    cleanZNode
++  ;;
++
++(autorestart)
++    check_before_start
++    nohup $thiscmd --config "${HBASE_CONF_DIR}" internal_autorestart $command $args < /dev/null > /dev/null 2>&1  &
+   ;;
+ 
+ (internal_autorestart)
+@@ -257,6 +235,8 @@ case $startStop in
+   ;;
+ 
+ (restart)
++    thiscmd=$0
++    args=$@
+     # stop the command
+     $thiscmd --config "${HBASE_CONF_DIR}" stop $command $args &
+     wait_until_done $!
+diff --git hbase-server/src/main/java/org/apache/hadoop/hbase/master/HMasterCommandLine.java hbase-server/src/main/java/org/apache/hadoop/hbase/master/HMasterCommandLine.java
+index 3d093a8..1c5bcc4 100644
+--- hbase-server/src/main/java/org/apache/hadoop/hbase/master/HMasterCommandLine.java
++++ hbase-server/src/main/java/org/apache/hadoop/hbase/master/HMasterCommandLine.java
+@@ -51,6 +51,7 @@ public class HMasterCommandLine extends ServerCommandLine {
+     " start  Start Master. If local mode, start Master and RegionServer in same JVM\n" +
+     " stop   Start cluster shutdown; Master signals RegionServer shutdown\n" +
+     " clear  Delete the master znode in ZooKeeper after a master crashes\n "+
++    " supervise  clear and start.  Useful for supervisor-like scripts\n" +
+     " where [opts] are:\n" +
+     "   --minServers=<servers>    Minimum RegionServers needed to host user tables.\n" +
+     "   --backup                  Master should start in backup mode";
+@@ -108,6 +109,9 @@ public class HMasterCommandLine extends ServerCommandLine {
+       return stopMaster();
+     } else if ("clear".equals(command)) {
+       return (ZNodeClearer.clear(getConf()) ? 0 : -1);
++    } else if ("supervise".equals(command)) {
++      ZNodeClearer.clear(getConf());
++      return startMaster();
+     } else {
+       usage("Invalid command: " + command);
+       return -1;

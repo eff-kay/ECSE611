@@ -1,0 +1,44 @@
+From 1b7b5ccbd2936589d01bbae165284b6f94fd1b62 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E8=B5=B5=E4=BA=91?= <xiaowen147@gmail.com>
+Date: Sat, 3 Feb 2018 11:45:07 +0800
+Subject: [PATCH] HBASE-19925 Delete an unreachable peer will triggers all
+ regionservers abort
+
+---
+ .../org/apache/hadoop/hbase/replication/HBaseReplicationEndpoint.java | 4 ++--
+ .../hadoop/hbase/replication/regionserver/ReplicationSource.java      | 4 ++++
+ 2 files changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/replication/HBaseReplicationEndpoint.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/replication/HBaseReplicationEndpoint.java
+index bd5c529..402ce06 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/replication/HBaseReplicationEndpoint.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/replication/HBaseReplicationEndpoint.java
+@@ -66,8 +66,8 @@ public abstract class HBaseReplicationEndpoint extends BaseReplicationEndpoint
+    * @param ke
+    */
+   protected void reconnect(KeeperException ke) {
+-    if (ke instanceof ConnectionLossException || ke instanceof SessionExpiredException
+-        || ke instanceof AuthFailedException) {
++    if ((ke instanceof ConnectionLossException || ke instanceof SessionExpiredException
++        || ke instanceof AuthFailedException) && this.isRunning()) {
+       String clusterKey = ctx.getPeerConfig().getClusterKey();
+       LOG.warn("Lost the ZooKeeper connection for peer " + clusterKey, ke);
+       try {
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/replication/regionserver/ReplicationSource.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/replication/regionserver/ReplicationSource.java
+index 09b6cc1..6f37fb1 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/replication/regionserver/ReplicationSource.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/replication/regionserver/ReplicationSource.java
+@@ -424,6 +424,10 @@ public class ReplicationSource implements ReplicationSourceInterface {
+       }
+     }
+ 
++    if (!this.isSourceActive() && this.peerClusterId == null) {
++      return;
++    }
++
+     // In rare case, zookeeper setting may be messed up. That leads to the incorrect
+     // peerClusterId value, which is the same as the source clusterId
+     if (clusterId.equals(peerClusterId) && !replicationEndpoint.canReplicateToSameCluster()) {
+-- 
+2.9.3.windows.2
+

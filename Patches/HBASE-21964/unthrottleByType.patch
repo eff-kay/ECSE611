@@ -1,0 +1,699 @@
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/quotas/QuotaSettingsFactory.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/quotas/QuotaSettingsFactory.java
+index f78c7f8..59ef22f 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/quotas/QuotaSettingsFactory.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/quotas/QuotaSettingsFactory.java
+@@ -10,10 +10,6 @@
+  */
+ package org.apache.hadoop.hbase.quotas;
+ 
+-import java.util.ArrayList;
+-import java.util.List;
+-import java.util.concurrent.TimeUnit;
+-
+ import org.apache.hadoop.hbase.TableName;
+ import org.apache.hadoop.hbase.classification.InterfaceAudience;
+ import org.apache.hadoop.hbase.classification.InterfaceStability;
+@@ -22,6 +18,10 @@ import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.SetQuotaRequest;
+ import org.apache.hadoop.hbase.protobuf.generated.QuotaProtos;
+ import org.apache.hadoop.hbase.protobuf.generated.QuotaProtos.Quotas;
+ 
++import java.util.ArrayList;
++import java.util.List;
++import java.util.concurrent.TimeUnit;
++
+ @InterfaceAudience.Public
+ @InterfaceStability.Evolving
+ public class QuotaSettingsFactory {
+@@ -266,4 +266,46 @@ public class QuotaSettingsFactory {
+   public static QuotaSettings bypassGlobals(final String userName, final boolean bypassGlobals) {
+     return new QuotaGlobalsSettingsBypass(userName, null, null, bypassGlobals);
+   }
++
++  /**
++   * Remove the throttling for the specified table.
++   * @param tableName the table
++   * @return the quota settings
++   */
++  public static QuotaSettings unthrottleTable(final TableName tableName,final ThrottleType type) {
++    return throttle(null, tableName, null, type, 0, null);
++  }
++
++  /**
++   * Remove the throttling for the specified user on the specified namespace.
++   * @param userName the user
++   * @param namespace the namespace
++   * @return the quota settings
++   */
++  public static QuotaSettings unthrottleUserThrottleType(final String userName, final String namespace,final ThrottleType throttleType) {
++    return throttle(userName, null, namespace, throttleType, 0, null);
++  }
++
++  /**
++   * Remove the throttling for the specified user on the specified table,which throttle type is throttleType
++   *
++   * create by yaojingyi : add throttleType
++   *
++   * @param userName the user
++   * @param tableName the table
++   * @param throttleType  ThrottleType
++   * @return
++   */
++  public static QuotaSettings unthrottleUserThrottleType(final String userName, final TableName tableName,final ThrottleType throttleType) {
++    return throttle(userName, tableName, null, throttleType, 0, null);
++  }
++
++  /**
++   * Remove the throttling for the specified user.
++   * @param userName the user
++   * @return the quota settings
++   */
++  public static QuotaSettings unthrottleUserThrottleType(final String userName,final ThrottleType throttleType) {
++    return throttle(userName, null, null, throttleType, 0, null);
++  }
+ }
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/quotas/MasterQuotaManager.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/quotas/MasterQuotaManager.java
+index f1b7ff9..5d522c8 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/quotas/MasterQuotaManager.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/quotas/MasterQuotaManager.java
+@@ -11,31 +11,26 @@
+ 
+ package org.apache.hadoop.hbase.quotas;
+ 
+-import java.io.IOException;
+-import java.util.HashSet;
+-
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+-import org.apache.hadoop.hbase.DoNotRetryIOException;
+-import org.apache.hadoop.hbase.HRegionInfo;
+-import org.apache.hadoop.hbase.MetaTableAccessor;
+-import org.apache.hadoop.hbase.NamespaceDescriptor;
+-import org.apache.hadoop.hbase.RegionStateListener;
+-import org.apache.hadoop.hbase.TableName;
++import org.apache.hadoop.hbase.*;
+ import org.apache.hadoop.hbase.classification.InterfaceAudience;
+ import org.apache.hadoop.hbase.classification.InterfaceStability;
+ import org.apache.hadoop.hbase.master.MasterServices;
+ import org.apache.hadoop.hbase.namespace.NamespaceAuditor;
+-import org.apache.hadoop.hbase.master.procedure.CreateTableProcedure;
+ import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
+ import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.SetQuotaRequest;
+ import org.apache.hadoop.hbase.protobuf.generated.MasterProtos.SetQuotaResponse;
++import org.apache.hadoop.hbase.protobuf.generated.QuotaProtos;
+ import org.apache.hadoop.hbase.protobuf.generated.QuotaProtos.Quotas;
+ import org.apache.hadoop.hbase.protobuf.generated.QuotaProtos.Throttle;
+ import org.apache.hadoop.hbase.protobuf.generated.QuotaProtos.ThrottleRequest;
+ import org.apache.hadoop.hbase.protobuf.generated.QuotaProtos.TimedQuota;
+ import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
+ 
++import java.io.IOException;
++import java.util.HashSet;
++
+ /**
+  * Master Quota Manager. It is responsible for initialize the quota table on the first-run and
+  * provide the admin operations to interact with the quota table. TODO: FUTURE: The master will be
+@@ -392,63 +387,112 @@ public class MasterQuotaManager implements RegionStateListener {
+   private void applyThrottle(final Quotas.Builder quotas, final ThrottleRequest req)
+       throws IOException {
+     Throttle.Builder throttle;
+-
++    //    LOG.debug("applyThrottle req.hasType():"+req.hasType()+" "+req.getType());
++    //    LOG.debug("applyThrottle req.hasTimedQuota():"+req.hasTimedQuota());
++    //    LOG.debug("applyThrottle quotas.hasThrottle():"+quotas.hasThrottle());
+     if (req.hasType() && (req.hasTimedQuota() || quotas.hasThrottle())) {
+       // Validate timed quota if present
+-      if (req.hasTimedQuota()) {
+-        validateTimedQuota(req.getTimedQuota());
+-      }
++      if (req.hasTimedQuota()) validateTimedQuota(req.getTimedQuota());
+ 
+       // apply the new settings
+-      throttle = quotas.hasThrottle() ? quotas.getThrottle().toBuilder() : Throttle.newBuilder();
++      //throttle = quotas.hasThrottle() ? quotas.getThrottle().toBuilder() : Throttle.newBuilder();
+ 
+-      switch (req.getType()) {
+-      case REQUEST_NUMBER:
+-        if (req.hasTimedQuota()) {
++      if(req.hasTimedQuota()){
++
++        throttle=quotas.getThrottle().toBuilder();
++
++        switch (req.getType()) {
++        case REQUEST_NUMBER:
+           throttle.setReqNum(req.getTimedQuota());
+-        } else {
+-          throttle.clearReqNum();
+-        }
+-        break;
+-      case REQUEST_SIZE:
+-        if (req.hasTimedQuota()) {
++          break;
++        case REQUEST_SIZE:
+           throttle.setReqSize(req.getTimedQuota());
+-        } else {
+-          throttle.clearReqSize();
+-        }
+-        break;
+-      case WRITE_NUMBER:
+-        if (req.hasTimedQuota()) {
++          break;
++        case WRITE_NUMBER:
+           throttle.setWriteNum(req.getTimedQuota());
+-        } else {
+-          throttle.clearWriteNum();
+-        }
+-        break;
+-      case WRITE_SIZE:
+-        if (req.hasTimedQuota()) {
++          break;
++        case WRITE_SIZE:
+           throttle.setWriteSize(req.getTimedQuota());
+-        } else {
+-          throttle.clearWriteSize();
+-        }
+-        break;
+-      case READ_NUMBER:
+-        if (req.hasTimedQuota()) {
++          break;
++        case READ_NUMBER:
+           throttle.setReadNum(req.getTimedQuota());
+-        } else {
+-          throttle.clearReqNum();
+-        }
+-        break;
+-      case READ_SIZE:
+-        if (req.hasTimedQuota()) {
++          break;
++        case READ_SIZE:
+           throttle.setReadSize(req.getTimedQuota());
+-        } else {
+-          throttle.clearReadSize();
++          break;
++        }
++        quotas.setThrottle(throttle.build());
++      }else{
++
++        throttle =Throttle.newBuilder();
++        Throttle old_throttle=quotas.getThrottle();
++
++        boolean toSetOldThrottle=false;
++
++        for(QuotaProtos.ThrottleType quotaType: QuotaProtos.ThrottleType.values()){
++
++          if(quotaType.equals(req.getType())){
++            continue;
++          }
++          switch (quotaType) {
++          case REQUEST_NUMBER:
++            if(old_throttle.getReqNum().hasTimeUnit()){
++              throttle.setReqNum(old_throttle.getReqNum());
++              toSetOldThrottle=true;
++            }else{
++              throttle.clearReqNum();
++            }
++            break;
++          case REQUEST_SIZE:
++            if(old_throttle.getReqSize().hasTimeUnit()){
++              throttle.setReqSize(old_throttle.getReqSize());
++              toSetOldThrottle=true;
++            }else{
++              throttle.clearReqSize();
++            }
++            break;
++          case WRITE_NUMBER:
++            if(old_throttle.getWriteNum().hasTimeUnit()){
++              throttle.setWriteNum(old_throttle.getWriteNum());
++              toSetOldThrottle=true;
++            }else{
++              throttle.clearWriteNum();
++            }
++            break;
++          case WRITE_SIZE:
++            if(old_throttle.getWriteSize().hasTimeUnit()){
++              throttle.setWriteSize(old_throttle.getWriteSize());
++              toSetOldThrottle=true;
++            }else{
++              throttle.clearWriteSize();
++            }
++            break;
++          case READ_NUMBER:
++            if(old_throttle.getReadNum().hasTimeUnit()){
++              throttle.setReadNum(old_throttle.getReadNum());
++              toSetOldThrottle=true;
++            }else{
++              throttle.clearReadNum();
++            }
++            break;
++          case READ_SIZE:
++            if(old_throttle.getReadSize().hasTimeUnit()){
++              throttle.setReadSize(old_throttle.getReadSize());
++              toSetOldThrottle=true;
++            }else{
++              throttle.clearReadSize();
++            }
++            break;
++          }
+         }
+-        break;
+-      default:
+-        throw new RuntimeException("Invalid throttle type: " + req.getType());
++
++        if(toSetOldThrottle){
++          quotas.setThrottle(throttle.build());
++        }else{
++          quotas.clearThrottle();
++        }
++
+       }
+-      quotas.setThrottle(throttle.build());
+     } else {
+       quotas.clearThrottle();
+     }
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/quotas/TestQuotaThrottle.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/quotas/TestQuotaThrottle.java
+index 4605663..f8e6430 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/quotas/TestQuotaThrottle.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/quotas/TestQuotaThrottle.java
+@@ -11,20 +11,11 @@
+ 
+ package org.apache.hadoop.hbase.quotas;
+ 
+-import static org.junit.Assert.assertEquals;
+-
+-import java.util.concurrent.TimeUnit;
+-
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+-import org.apache.hadoop.hbase.HBaseTestingUtility;
+-import org.apache.hadoop.hbase.HConstants;
+-import org.apache.hadoop.hbase.TableName;
+-import org.apache.hadoop.hbase.client.Admin;
+-import org.apache.hadoop.hbase.client.Get;
+-import org.apache.hadoop.hbase.client.HTable;
+-import org.apache.hadoop.hbase.client.Put;
+-import org.apache.hadoop.hbase.client.RetriesExhaustedWithDetailsException;
++import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.hbase.*;
++import org.apache.hadoop.hbase.client.*;
+ import org.apache.hadoop.hbase.security.User;
+ import org.apache.hadoop.hbase.testclassification.MediumTests;
+ import org.apache.hadoop.hbase.util.Bytes;
+@@ -38,6 +29,11 @@ import org.junit.BeforeClass;
+ import org.junit.Test;
+ import org.junit.experimental.categories.Category;
+ 
++import java.io.IOException;
++import java.util.concurrent.TimeUnit;
++
++import static org.junit.Assert.assertEquals;
++
+ @Category({ MediumTests.class })
+ public class TestQuotaThrottle {
+   final Log LOG = LogFactory.getLog(getClass());
+@@ -51,6 +47,8 @@ public class TestQuotaThrottle {
+       TableName.valueOf("TestQuotaAdmin0"), TableName.valueOf("TestQuotaAdmin1"),
+       TableName.valueOf("TestQuotaAdmin2") };
+ 
++  private final static String[] NAMESPACE={"ns1","ns2","ns3"};
++
+   private static HTable[] tables;
+ 
+   @BeforeClass
+@@ -580,4 +578,285 @@ public class TestQuotaThrottle {
+     EnvironmentEdgeManagerTestHelper.injectEdge(new IncrementingEnvironmentEdge(
+         EnvironmentEdgeManager.currentTime() + 70000));
+   }
++
++
++
++  //setQuota Table Type
++  @Test(timeout=6*60*1000)  //RW_NEW 01
++  public void testThrottleUnThrottleTable() throws Exception {
++    final HBaseAdmin admin = TEST_UTIL.getHBaseAdmin();
++    final String userName = User.getCurrent().getShortName();
++
++    // Add 6req/min limit for read request
++    admin.setQuota(QuotaSettingsFactory
++        .throttleTable( TABLE_NAMES[0],ThrottleType.READ_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleTable( TABLE_NAMES[0],ThrottleType.READ_NUMBER, 7, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleTable( TABLE_NAMES[0],ThrottleType.READ_SIZE, 7, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleTable( TABLE_NAMES[0], ThrottleType.WRITE_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleTable( TABLE_NAMES[0], ThrottleType.WRITE_SIZE, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleTable( TABLE_NAMES[0], ThrottleType.REQUEST_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleTable( TABLE_NAMES[0], ThrottleType.WRITE_NUMBER, 6, TimeUnit.MINUTES));
++
++    admin.setQuota(QuotaSettingsFactory
++        .throttleTable( TABLE_NAMES[1], ThrottleType.WRITE_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleTable( TABLE_NAMES[1], ThrottleType.READ_NUMBER, 6, TimeUnit.MINUTES));
++
++    admin.setQuota(QuotaSettingsFactory
++        .throttleTable( TABLE_NAMES[2], ThrottleType.WRITE_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleTable( TABLE_NAMES[2], ThrottleType.READ_NUMBER, 6, TimeUnit.MINUTES));
++
++    logQuotaTable();
++
++    for(ThrottleType quotaType: ThrottleType.values()){
++      admin.setQuota(QuotaSettingsFactory.unthrottleTable( TABLE_NAMES[0],quotaType));
++    }
++
++    logQuotaTable();
++
++    assertEquals(4, getQuotaSettingCount(admin));
++
++  }
++
++  //setQuota Table & User Type
++  @Test(timeout=6*60*1000)  //RW_NEW 01
++  public void testThrottleUnThrottleTableUser() throws Exception {
++    final HBaseAdmin admin = TEST_UTIL.getHBaseAdmin();
++    final String userName = User.getCurrent().getShortName();
++
++    // Add 6req/min limit for read request
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, TABLE_NAMES[0],ThrottleType.READ_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, TABLE_NAMES[0],ThrottleType.READ_NUMBER, 7, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, TABLE_NAMES[0],ThrottleType.READ_SIZE, 7, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, TABLE_NAMES[0], ThrottleType.WRITE_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, TABLE_NAMES[0], ThrottleType.WRITE_SIZE, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, TABLE_NAMES[0], ThrottleType.REQUEST_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, TABLE_NAMES[0], ThrottleType.WRITE_NUMBER, 6, TimeUnit.MINUTES));
++
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, TABLE_NAMES[1], ThrottleType.WRITE_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, TABLE_NAMES[1], ThrottleType.READ_NUMBER, 6, TimeUnit.MINUTES));
++
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, TABLE_NAMES[2], ThrottleType.WRITE_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, TABLE_NAMES[2], ThrottleType.READ_NUMBER, 6, TimeUnit.MINUTES));
++
++    logQuotaTable();
++
++    for(ThrottleType quotaType: ThrottleType.values()){
++      admin.setQuota(QuotaSettingsFactory.unthrottleUserThrottleType(userName, TABLE_NAMES[0],quotaType));
++    }
++
++    logQuotaTable();
++
++    assertEquals(4, getQuotaSettingCount(admin));
++
++
++  }
++
++  //setQuota  NameSpace Type
++  @Test(timeout=6*60*1000)  //RW_NEW 01
++  public void testThrottleUnThrottleNameSpace() throws Exception {
++    final HBaseAdmin admin = TEST_UTIL.getHBaseAdmin();
++    final String userName = User.getCurrent().getShortName();
++
++    // Add 6req/min limit for read request
++    admin.setQuota(QuotaSettingsFactory
++        .throttleNamespace( NAMESPACE[0],ThrottleType.READ_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleNamespace( NAMESPACE[0],ThrottleType.READ_NUMBER, 7, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleNamespace( NAMESPACE[0],ThrottleType.READ_SIZE, 7, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleNamespace( NAMESPACE[0], ThrottleType.WRITE_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleNamespace( NAMESPACE[0], ThrottleType.WRITE_SIZE, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleNamespace( NAMESPACE[0], ThrottleType.REQUEST_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleNamespace( NAMESPACE[0], ThrottleType.WRITE_NUMBER, 6, TimeUnit.MINUTES));
++
++    admin.setQuota(QuotaSettingsFactory
++        .throttleNamespace( NAMESPACE[1], ThrottleType.WRITE_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleNamespace( NAMESPACE[1], ThrottleType.READ_NUMBER, 6, TimeUnit.MINUTES));
++
++    admin.setQuota(QuotaSettingsFactory
++        .throttleNamespace( NAMESPACE[2], ThrottleType.WRITE_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleNamespace( NAMESPACE[2], ThrottleType.READ_NUMBER, 6, TimeUnit.MINUTES));
++
++    logQuotaTable();
++
++    for(ThrottleType quotaType: ThrottleType.values()){
++      admin.setQuota(QuotaSettingsFactory.unthrottleNamespace( NAMESPACE[0]));
++    }
++
++    logQuotaTable();
++
++    assertEquals(4, getQuotaSettingCount(admin));
++
++  }
++
++  //setQuota NameSpace & User Type
++  @Test(timeout=6*60*1000)  //RW_NEW 01
++  public void testThrottleUnThrottleNameSpaceUser() throws Exception {
++    final HBaseAdmin admin = TEST_UTIL.getHBaseAdmin();
++    final String userName = User.getCurrent().getShortName();
++
++    // Add 6req/min limit for read request
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, NAMESPACE[0],ThrottleType.READ_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, NAMESPACE[0],ThrottleType.READ_NUMBER, 7, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, NAMESPACE[0],ThrottleType.READ_SIZE, 7, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, NAMESPACE[0], ThrottleType.WRITE_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, NAMESPACE[0], ThrottleType.WRITE_SIZE, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, NAMESPACE[0], ThrottleType.REQUEST_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, NAMESPACE[0], ThrottleType.WRITE_NUMBER, 6, TimeUnit.MINUTES));
++
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, NAMESPACE[1], ThrottleType.WRITE_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, NAMESPACE[1], ThrottleType.READ_NUMBER, 6, TimeUnit.MINUTES));
++
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, NAMESPACE[2], ThrottleType.WRITE_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, NAMESPACE[2], ThrottleType.READ_NUMBER, 6, TimeUnit.MINUTES));
++
++    logQuotaTable();
++
++    for(ThrottleType quotaType: ThrottleType.values()){
++      admin.setQuota(QuotaSettingsFactory.unthrottleUserThrottleType(userName, NAMESPACE[0],quotaType));
++    }
++
++    logQuotaTable();
++
++    assertEquals(4, getQuotaSettingCount(admin));
++
++  }
++
++
++  //setQuota User Type
++  @Test(timeout=6*60*1000)  //RW_NEW 01
++  public void testThrottleUnThrottleUser() throws Exception {
++    final HBaseAdmin admin = TEST_UTIL.getHBaseAdmin();
++    final String userName = User.getCurrent().getShortName();
++    final String userName2 = "username2";
++    final String userName3 = "username3";
++
++    // Add 6req/min limit for read request
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName,ThrottleType.READ_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName,ThrottleType.READ_NUMBER, 7, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName,ThrottleType.READ_SIZE, 7, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, ThrottleType.WRITE_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, ThrottleType.WRITE_SIZE, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, ThrottleType.REQUEST_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName, ThrottleType.WRITE_NUMBER, 6, TimeUnit.MINUTES));
++
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName2, ThrottleType.WRITE_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName2, ThrottleType.READ_NUMBER, 6, TimeUnit.MINUTES));
++
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName3, ThrottleType.WRITE_NUMBER, 6, TimeUnit.MINUTES));
++    admin.setQuota(QuotaSettingsFactory
++        .throttleUser(userName3, ThrottleType.READ_NUMBER, 6, TimeUnit.MINUTES));
++
++    logQuotaTable();
++
++    for(ThrottleType quotaType: ThrottleType.values()){
++      admin.setQuota(QuotaSettingsFactory.unthrottleUserThrottleType(userName,quotaType));
++    }
++
++    logQuotaTable();
++
++    assertEquals(4, getQuotaSettingCount(admin));
++
++
++  }
++
++
++  //setQuota set & unset
++  @Test(timeout=6*60*1000)  //RW_NEW 01
++  public void testThrottleUnThrottleType() throws Exception {
++    final HBaseAdmin admin = TEST_UTIL.getHBaseAdmin();
++
++    for(ThrottleType quotaType: ThrottleType.values()){
++      admin.setQuota(QuotaSettingsFactory
++          .throttleTable( TABLE_NAMES[0],quotaType, 6, TimeUnit.MINUTES));
++      admin.setQuota(QuotaSettingsFactory.unthrottleTable( TABLE_NAMES[0],quotaType));
++    }
++
++    logQuotaTable();
++
++    assertEquals(0, getQuotaSettingCount(admin));
++
++  }
++
++
++
++
++  public int getQuotaSettingCount(HBaseAdmin admin) throws IOException {
++    QuotaRetriever list_quotas=admin.getQuotaRetriever(new QuotaFilter());
++    int quotaSettingCount=0;
++    for(QuotaSettings setting:list_quotas){
++      quotaSettingCount++;
++      LOG.info("Quota Setting:"+setting);
++    }
++    return quotaSettingCount;
++
++  }
++
++
++
++  public void logQuotaTable() throws IOException {
++
++    Configuration conf=TEST_UTIL.getConfiguration();
++    HConnection conn=HConnectionManager.createConnection(conf);
++    HTableInterface table = conn.getTable("hbase:quota");
++    Scan scan =new Scan();
++    ResultScanner resultScanner = table.getScanner(scan);
++    Result result = resultScanner.next();
++    while (result != null) {
++      for (Cell cell : result.rawCells()) {
++        LOG.info("SCAN hbase:quota Rowkey:" + new String(CellUtil.cloneRow(cell)) + " ");
++        LOG.info("SCAN hbase:quota Timetamp:" + cell.getTimestamp() + " ");
++        LOG.info("SCAN hbase:quota column Family:" + new String(CellUtil.cloneFamily(cell)) + " ");
++        LOG.info("SCAN hbase:quota column Name:" + new String(CellUtil.cloneQualifier(cell)) + " ");
++        LOG.info("SCAN hbase:quota value:" + new String(CellUtil.cloneValue(cell)) + " ");
++      }
++      result = resultScanner.next();
++    }
++  }
+ }
+diff --git a/hbase-shell/src/main/ruby/hbase/quotas.rb b/hbase-shell/src/main/ruby/hbase/quotas.rb
+index bf2dc63..f5cd76a 100644
+--- a/hbase-shell/src/main/ruby/hbase/quotas.rb
++++ b/hbase-shell/src/main/ruby/hbase/quotas.rb
+@@ -32,6 +32,12 @@ module HBaseQuotasConstants
+   REQUEST = 'REQUEST'
+   WRITE = 'WRITE'
+   READ = 'READ'
++    READ_NUMBER = 'READ_NUMBER'
++    READ_SIZE = 'READ_SIZE'
++    WRITE_NUMBER = 'WRITE_NUMBER'
++    WRITE_SIZE = 'WRITE_SIZE'
++    REQUEST_NUMBER = 'REQUEST_NUMBER'
++    REQUEST_SIZE = 'REQUEST_SIZE'
+ end
+ 
+ module Hbase
+@@ -83,30 +89,65 @@ module Hbase
+         user = args.delete(USER)
+         if args.has_key?(TABLE)
+           table = TableName.valueOf(args.delete(TABLE))
+-          raise(ArgumentError, "Unexpected arguments: " + args.inspect) unless args.empty?
+-          settings = QuotaSettingsFactory.unthrottleUser(user, table)
++          if args.has_key?(THROTTLE_TYPE)
++            throttle_type_str = args.delete(THROTTLE_TYPE)
++            throttle_type=_parse_throttle_type(ThrottleType,throttle_type_str)
++            settings = QuotaSettingsFactory.unthrottleUserThrottleType(user, table, throttle_type)
++          else
++            raise(ArgumentError, "Unexpected arguments: " + args.inspect) unless args.empty?
++            settings = QuotaSettingsFactory.unthrottleUser(user, table)
++          end
+         elsif args.has_key?(NAMESPACE)
+           namespace = args.delete(NAMESPACE)
+-          raise(ArgumentError, "Unexpected arguments: " + args.inspect) unless args.empty?
+-          settings = QuotaSettingsFactory.unthrottleUser(user, namespace)
++           if args.has_key?(THROTTLE_TYPE)
++            throttle_type_str = args.delete(THROTTLE_TYPE)
++            throttle_type=_parse_throttle_type(ThrottleType,throttle_type_str)
++            settings = QuotaSettingsFactory.unthrottleUserThrottleType(user, namespace,throttle_type)
++          else
++            raise(ArgumentError, "Unexpected arguments: " + args.inspect) unless args.empty?
++            settings = QuotaSettingsFactory.unthrottleUser(user, namespace)
++          end
+         else
+-          raise(ArgumentError, "Unexpected arguments: " + args.inspect) unless args.empty?
+-          settings = QuotaSettingsFactory.unthrottleUser(user)
++          if args.has_key?(THROTTLE_TYPE)
++            throttle_type_str = args.delete(THROTTLE_TYPE)
++            throttle_type=_parse_throttle_type(ThrottleType,throttle_type_str)
++            settings = QuotaSettingsFactory.unthrottleUserThrottleType(user,throttle_type)
++          else
++            raise(ArgumentError, "Unexpected arguments: " + args.inspect) unless args.empty?
++            settings = QuotaSettingsFactory.unthrottleUser(user)
++          end
+         end
+       elsif args.has_key?(TABLE)
+         table = TableName.valueOf(args.delete(TABLE))
+-        raise(ArgumentError, "Unexpected arguments: " + args.inspect) unless args.empty?
+-        settings = QuotaSettingsFactory.unthrottleTable(table)
++        if args.has_key?(THROTTLE_TYPE)
++          throttle_type_str = args.delete(THROTTLE_TYPE)
++          throttle_type=_parse_throttle_type(ThrottleType,throttle_type_str)
++          settings = QuotaSettingsFactory.unthrottleTable(table,throttle_type)
++        else
++          raise(ArgumentError, "Unexpected arguments: " + args.inspect) unless args.empty?
++          settings = QuotaSettingsFactory.unthrottleTable(table)
++        end
+       elsif args.has_key?(NAMESPACE)
+         namespace = args.delete(NAMESPACE)
+-        raise(ArgumentError, "Unexpected arguments: " + args.inspect) unless args.empty?
+-        settings = QuotaSettingsFactory.unthrottleNamespace(namespace)
++        if args.has_key?(THROTTLE_TYPE)
++          throttle_type_str = args.delete(THROTTLE_TYPE)
++          throttle_type=_parse_throttle_type(ThrottleType,throttle_type_str)
++          settings = QuotaSettingsFactory.unthrottleNamespace(table,throttle_type)
++        else
++          raise(ArgumentError, "Unexpected arguments: " + args.inspect) unless args.empty?
++          settings = QuotaSettingsFactory.unthrottleNamespace(namespace)
++        end
+       else
+         raise "One of USER, TABLE or NAMESPACE must be specified"
+       end
+       @admin.setQuota(settings)
+     end
+ 
++    def _parse_throttle_type(type_cls, throttle_type)
++       type = type_cls.valueOf(throttle_type)
++       return type
++    end
++
+     def set_global_bypass(bypass, args)
+       raise(ArgumentError, "Arguments should be a Hash") unless args.kind_of?(Hash)
+ 

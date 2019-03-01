@@ -1,0 +1,362 @@
+From e51041f6ed912af89b33cc5a32caea6694df5d6d Mon Sep 17 00:00:00 2001
+From: Pankaj <pankaj.kr@huawei.com>
+Date: Wed, 25 Jul 2018 01:14:04 +0530
+Subject: [PATCH] HBASE-9888 HBase replicates edits written before the
+ replication peer is created
+
+---
+ .../hadoop/hbase/replication/ReplicationPeer.java  |   6 ++
+ .../hbase/replication/ReplicationPeerZKImpl.java   |  22 ++++
+ .../hbase/replication/ReplicationPeersZKImpl.java  |   8 ++
+ .../java/org/apache/hadoop/hbase/HConstants.java   |   4 +
+ .../replication/WALKeyWriteTimeBasedFilter.java    |  46 +++++++++
+ .../regionserver/ReplicationSource.java            |  22 ++++
+ .../replication/TestMultiSlaveReplication.java     |   1 +
+ .../hbase/replication/TestReplicationEndpoint.java |   1 +
+ .../TestWALKeyWriteTimeBasedFilter.java            | 113 +++++++++++++++++++++
+ 9 files changed, 223 insertions(+)
+ create mode 100644 hbase-server/src/main/java/org/apache/hadoop/hbase/replication/WALKeyWriteTimeBasedFilter.java
+ create mode 100644 hbase-server/src/test/java/org/apache/hadoop/hbase/replication/TestWALKeyWriteTimeBasedFilter.java
+
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/replication/ReplicationPeer.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/replication/ReplicationPeer.java
+index a0e758f..b9fbfd2 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/replication/ReplicationPeer.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/replication/ReplicationPeer.java
+@@ -87,4 +87,10 @@ public interface ReplicationPeer {
+    * @param listener Listener for config changes, usually a replication endpoint
+    */
+   void removeListenerOfPeerConfig(ReplicationPeerConfigListener listener);
++
++  /**
++   * Returns the peer creation time.
++   * @return creation time of replication peer
++   */
++  long getPeerCreationTime();
+ }
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/replication/ReplicationPeerZKImpl.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/replication/ReplicationPeerZKImpl.java
+index 57b118d..0fc9f84 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/replication/ReplicationPeerZKImpl.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/replication/ReplicationPeerZKImpl.java
+@@ -42,6 +42,7 @@ import org.apache.hadoop.hbase.zookeeper.ZooKeeperNodeTracker;
+ import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+ import org.apache.zookeeper.KeeperException;
+ import org.apache.zookeeper.KeeperException.NodeExistsException;
++import org.apache.zookeeper.data.Stat;
+ 
+ @InterfaceAudience.Private
+ public class ReplicationPeerZKImpl extends ReplicationStateZKBase implements ReplicationPeer,
+@@ -57,6 +58,9 @@ public class ReplicationPeerZKImpl extends ReplicationStateZKBase implements Rep
+   private PeerStateTracker peerStateTracker;
+   private PeerConfigTracker peerConfigTracker;
+ 
++  // initialize the node creation time to be used for comparison with WALKey writeTime
++  private long peerCreationTime = Long.MIN_VALUE;
++
+   /**
+    * Constructor that takes all the objects required to communicate with the specified peer, except
+    * for the region server addresses.
+@@ -207,6 +211,24 @@ public class ReplicationPeerZKImpl extends ReplicationStateZKBase implements Rep
+     // TODO: stop zkw?
+   }
+ 
++  @Override
++  public long getPeerCreationTime() {
++    return this.peerCreationTime;
++  }
++
++  /**
++   * Initialize peer creation time.
++   * @param zookeeper ZooKeeperWatcher
++   * @param peerNode Peer znode
++   * @throws KeeperException on failure
++   */
++  void initPeerCreationTime(final ZooKeeperWatcher zookeeper, String peerNode)
++      throws KeeperException {
++    final Stat stat = new Stat();
++    ZKUtil.getDataNoWatch(zookeeper, peerNode, stat);
++    this.peerCreationTime = stat.getCtime();
++  }
++
+   /**
+    * Parse the raw data from ZK to get a peer's state
+    * @param bytes raw ZK data
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/replication/ReplicationPeersZKImpl.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/replication/ReplicationPeersZKImpl.java
+index 6fefb36..fcb3bad 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/replication/ReplicationPeersZKImpl.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/replication/ReplicationPeersZKImpl.java
+@@ -509,6 +509,14 @@ public class ReplicationPeersZKImpl extends ReplicationStateZKBase implements Re
+           peerId, e);
+     }
+ 
++    // initialize peer creation time
++    try {
++      peer.initPeerCreationTime(this.zookeeper, getPeerNode(peerId));
++    } catch (KeeperException e) {
++      throw new ReplicationException(
++          "Error occured while initializing peer creation time for peerId=" + peerId, e);
++    }
++
+     try {
+       peer.startPeerConfigTracker(this.zookeeper, this.getPeerNode(peerId));
+     }
+diff --git a/hbase-common/src/main/java/org/apache/hadoop/hbase/HConstants.java b/hbase-common/src/main/java/org/apache/hadoop/hbase/HConstants.java
+index 3d1115b..c1f1fe9 100644
+--- a/hbase-common/src/main/java/org/apache/hadoop/hbase/HConstants.java
++++ b/hbase-common/src/main/java/org/apache/hadoop/hbase/HConstants.java
+@@ -1223,6 +1223,10 @@ public final class HConstants {
+   /** Maximum number of threads used by the replication source for shipping edits to the sinks */
+   public static final int REPLICATION_SOURCE_MAXTHREADS_DEFAULT = 10;
+ 
++  /** Config parameter to enable/disable wal key write time filter */
++  public static final String HBASE_REPLICATION_WAL_KEY_WRITE_TIME_FILTER_ENABLED =
++      "hbase.replication.walKeyWriteTime.filter.enabled";
++
+   /** Config for pluggable consensus provider */
+   public static final String HBASE_COORDINATED_STATE_MANAGER_CLASS =
+     "hbase.coordinated.state.manager.class";
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/replication/WALKeyWriteTimeBasedFilter.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/replication/WALKeyWriteTimeBasedFilter.java
+new file mode 100644
+index 0000000..bb2a1ec
+--- /dev/null
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/replication/WALKeyWriteTimeBasedFilter.java
+@@ -0,0 +1,46 @@
++/*
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.hadoop.hbase.replication;
++
++import org.apache.hadoop.hbase.classification.InterfaceAudience;
++import org.apache.hadoop.hbase.wal.WAL.Entry;
++
++/**
++ * This WALKEy writeTime based filter can be used to make sure replication source replicates only
++ * those WAL entries for which WalKey writeTime is after the creation time of replication source
++ */
++@InterfaceAudience.Private
++public class WALKeyWriteTimeBasedFilter implements WALEntryFilter {
++  private long baseWriteTime = Long.MIN_VALUE;
++
++  public WALKeyWriteTimeBasedFilter(long currentTime) {
++    this.baseWriteTime = currentTime;
++  }
++
++  @Override
++  public Entry filter(Entry entry) {
++    final long writeTime = entry.getKey().getWriteTime();
++    // when time is equal then allow replication?
++    if (writeTime < baseWriteTime) {
++      return null;
++    }
++    return entry;
++  }
++}
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/replication/regionserver/ReplicationSource.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/replication/regionserver/ReplicationSource.java
+index 2396655..18ce475 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/replication/regionserver/ReplicationSource.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/replication/regionserver/ReplicationSource.java
+@@ -63,6 +63,7 @@ import org.apache.hadoop.hbase.replication.ReplicationQueueInfo;
+ import org.apache.hadoop.hbase.replication.ReplicationQueues;
+ import org.apache.hadoop.hbase.replication.SystemTableWALEntryFilter;
+ import org.apache.hadoop.hbase.replication.WALEntryFilter;
++import org.apache.hadoop.hbase.replication.WALKeyWriteTimeBasedFilter;
+ import org.apache.hadoop.hbase.replication.regionserver.ReplicationSourceWALReaderThread.WALEntryBatch;
+ import org.apache.hadoop.hbase.util.Bytes;
+ import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
+@@ -292,6 +293,15 @@ public class ReplicationSource extends Thread implements ReplicationSourceInterf
+     // get the WALEntryFilter from ReplicationEndpoint and add it to default filters
+     ArrayList<WALEntryFilter> filters = Lists.newArrayList(
+       (WALEntryFilter)new SystemTableWALEntryFilter());
++
++    // add filter based on WALKey timestamp so that we do not replicate anything that was
++    // added before this ReplicationSource is created
++    final WALEntryFilter walKeyWriteTimeBasedFilter = initWALKeyWriteTimeFilter();
++    if (walKeyWriteTimeBasedFilter != null) {
++      filters.add(walKeyWriteTimeBasedFilter);
++      LOG.info("WALKey writeTime based filter for replication is enabled.");
++    }
++
+     WALEntryFilter filterFromEndpoint = this.replicationEndpoint.getWALEntryfilter();
+     if (filterFromEndpoint != null) {
+       filters.add(filterFromEndpoint);
+@@ -501,6 +511,18 @@ public class ReplicationSource extends Thread implements ReplicationSourceInterf
+     return peerBandwidth != 0 ? peerBandwidth : defaultBandwidth;
+   }
+ 
++  /**
++   * Add filter based on WALKey timestamp
++   */
++  private WALEntryFilter initWALKeyWriteTimeFilter() {
++    if (this.conf.getBoolean(HConstants.HBASE_REPLICATION_WAL_KEY_WRITE_TIME_FILTER_ENABLED,
++      true)) {
++      return new WALKeyWriteTimeBasedFilter(
++          this.replicationPeers.getPeer(this.peerId).getPeerCreationTime());
++    }
++    return null;
++  }
++
+   // This thread reads entries from a queue and ships them.
+   // Entries are placed onto the queue by ReplicationSourceWALReaderThread
+   public class ReplicationSourceShipperThread extends Thread {
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/replication/TestMultiSlaveReplication.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/replication/TestMultiSlaveReplication.java
+index ccaf20f..edc2f9a 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/replication/TestMultiSlaveReplication.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/replication/TestMultiSlaveReplication.java
+@@ -107,6 +107,7 @@ public class TestMultiSlaveReplication {
+     conf1.setClass("hbase.region.replica.replication.replicationQueues.class",
+         ReplicationQueuesZKImpl.class, ReplicationQueues.class);
+     conf1.setLong(ReplicationZKLockCleanerChore.TTL_CONFIG_KEY, 0L);
++    conf1.setBoolean("hbase.replication.walKeyWriteTime.filter.enabled", false);
+ 
+     utility1 = new HBaseTestingUtility(conf1);
+ 
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/replication/TestReplicationEndpoint.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/replication/TestReplicationEndpoint.java
+index 3b984ab..5de2b3d 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/replication/TestReplicationEndpoint.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/replication/TestReplicationEndpoint.java
+@@ -69,6 +69,7 @@ public class TestReplicationEndpoint extends TestReplicationBase {
+ 
+   @BeforeClass
+   public static void setUpBeforeClass() throws Exception {
++    conf1.setBoolean("hbase.replication.walKeyWriteTime.filter.enabled", false);
+     TestReplicationBase.setUpBeforeClass();
+     admin.removePeer("2");
+     numRegionServers = utility1.getHBaseCluster().getRegionServerThreads().size();
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/replication/TestWALKeyWriteTimeBasedFilter.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/replication/TestWALKeyWriteTimeBasedFilter.java
+new file mode 100644
+index 0000000..314e381
+--- /dev/null
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/replication/TestWALKeyWriteTimeBasedFilter.java
+@@ -0,0 +1,113 @@
++/*
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.hadoop.hbase.replication;
++
++import static org.junit.Assert.assertTrue;
++import static org.junit.Assert.fail;
++
++import java.io.IOException;
++
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
++import org.apache.hadoop.hbase.client.Admin;
++import org.apache.hadoop.hbase.client.Connection;
++import org.apache.hadoop.hbase.client.ConnectionFactory;
++import org.apache.hadoop.hbase.client.Put;
++import org.apache.hadoop.hbase.testclassification.MediumTests;
++import org.junit.Test;
++import org.junit.experimental.categories.Category;
++
++@Category(MediumTests.class)
++public class TestWALKeyWriteTimeBasedFilter extends TestReplicationBase {
++  private static final Log LOG = LogFactory.getLog(TestWALKeyWriteTimeBasedFilter.class);
++
++  @Test
++  public void testOldTableDataReplicationUponPeerReAddition()
++      throws InterruptedException, IOException, ReplicationException {
++    // Put records in source table
++    Put put = new Put(row);
++    put.addColumn(famName, "c1".getBytes(), "v1".getBytes());
++    htable1.put(put);
++    put = new Put("row2".getBytes());
++    put.addColumn(famName, "c1".getBytes(), "v2".getBytes());
++    htable1.put(put);
++
++    // wait for above put to replicate in peer cluster
++    for (int i = 0; i < NB_RETRIES; i++) {
++      if (i == NB_RETRIES - 1) {
++        fail("Waited too much time for put replication.");
++      }
++      int count = utility2.countRows(htable2);
++      if (count < 2) {
++        LOG.debug("Rows are not yet replicated to peer cluster table");
++        Thread.sleep(500);
++      } else {
++        assertTrue("Replicated rows count don't match with source cluster table row count",
++          count == 2);
++        break;
++      }
++    }
++
++    // Remove peer
++    admin.removePeer(PEER_ID);
++
++    // Truncate the table from source cluster
++    try (Connection conn1 = ConnectionFactory.createConnection(conf1);
++        Admin admin1 = conn1.getAdmin()) {
++      admin1.disableTable(tableName);
++      admin1.truncateTable(tableName, false);
++    }
++    assertTrue("Table should be truncated from source cluster", utility1.countRows(htable1) == 0);
++
++    // Truncate the table from peer cluster
++    try (Connection conn2 = ConnectionFactory.createConnection(conf2);
++        Admin admin2 = conn2.getAdmin()) {
++      admin2.disableTable(tableName);
++      admin2.truncateTable(tableName, false);
++    }
++    assertTrue("Table should be truncated from peer cluster", utility2.countRows(htable2) == 0);
++
++    // add peer again
++    admin.addPeer(PEER_ID, new ReplicationPeerConfig().setClusterKey(utility2.getClusterKey()),
++      null);
++
++    // add a new row to source cluster table
++    put = new Put("row3".getBytes());
++    put.addColumn(famName, "c1".getBytes(), "v33".getBytes());
++    htable1.put(put);
++    assertTrue("table data should be deleted from source", utility1.countRows(htable1) == 1);
++
++    // Wait for replication so that actual row count should be 1
++    for (int i = 0; i < NB_RETRIES; i++) {
++      if (i == NB_RETRIES - 1) {
++        fail("Waited too much time for put replication");
++      }
++      int count = utility2.countRows(htable2);
++      if (count < 1) {
++        LOG.debug("Rows are not yet replicated to peer cluster table");
++        Thread.sleep(5000);
++      } else {
++        assertTrue("Replicated rows count don't match with source cluster table row count",
++          count == 1);
++        break;
++      }
++    }
++  }
++}
+\ No newline at end of file
+-- 
+2.7.4
+

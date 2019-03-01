@@ -1,0 +1,1015 @@
+diff --git bin/graceful_stop.sh bin/graceful_stop.sh
+index 37b5685..3778067 100755
+--- bin/graceful_stop.sh
++++ bin/graceful_stop.sh
+@@ -23,11 +23,12 @@
+ # Move regions off a server then stop it.  Optionally restart and reload.
+ # Turn off the balancer before running this script.
+ function usage {
+-  echo "Usage: graceful_stop.sh [--config <conf-dir>] [-d] [-e] [--restart [--reload]] [--thrift] [--rest] <hostname>"
++  echo "Usage: graceful_stop.sh [--config <conf-dir>] [-d] [-e] [--restart [--reload]] [--thrift] [--rest] [--supervisor] <hostname>"
+   echo " thrift      If we should stop/start thrift before/after the hbase stop/start"
+   echo " rest        If we should stop/start rest before/after the hbase stop/start"
+   echo " restart     If we should restart after graceful stop"
+   echo " reload      Move offloaded regions back on to the restarted server"
++  echo " supervisor  If we use supervisor to control hbase daemons"
+   echo " d|debug     Print helpful debug information"
+   echo " hostname    Hostname of server we are to stop"
+   echo " e|failfast  Set -e so exit immediately if any command exits with non-zero status"
+@@ -48,12 +49,14 @@ reload=
+ debug=
+ thrift=
+ rest=
++supervisor=
+ failfast=
+ while [ $# -gt 0 ]
+ do
+   case "$1" in
+     --thrift)  thrift=true; shift;;
+     --rest)  rest=true; shift;;
++    --supervisor) supervisor=true; shift;;
+     --restart)  restart=true; shift;;
+     --reload)   reload=true; shift;;
+     --failfast | -e)  failfast=true; shift;;
+@@ -87,6 +90,19 @@ log "Disabling load balancer"
+ HBASE_BALANCER_STATE=`echo 'balance_switch false' | "$bin"/hbase --config ${HBASE_CONF_DIR} shell | tail -3 | head -1`
+ log "Previous balancer state was $HBASE_BALANCER_STATE"
+ 
++# Restore balancer state
++restore_balancer() {
++if [ "$HBASE_BALANCER_STATE" != "false" ]; then
++  log "Restoring balancer state to "$HBASE_BALANCER_STATE""
++  echo "balance_switch "$HBASE_BALANCER_STATE"" | "$bin"/hbase --config ${HBASE_CONF_DIR} shell &> /dev/null
++fi
++}
++
++clean() {
++# Cleanup tmp files.
++trap "rm -f  "/tmp/$(basename $0).*.tmp" &> /dev/null" EXIT
++}
++
+ log "Unloading $hostname region(s)"
+ HBASE_NOEXEC=true "$bin"/hbase --config ${HBASE_CONF_DIR} org.jruby.Main "$bin"/region_mover.rb --file=$filename $debug unload $hostname
+ log "Unloaded $hostname region(s)"
+@@ -94,6 +110,25 @@ log "Unloaded $hostname region(s)"
+ # Stop the server(s). Have to put hostname into its own little file for hbase-daemons.sh
+ hosts="/tmp/$(basename $0).$$.tmp"
+ echo $hostname >> $hosts
++
++# Support when running hbase under supervisor
++if [ "$restart" != "" ] && [ "$supervisor" != "" ]; then
++  remote_start_rs="cd "$bin/supervisord"; ./hbase-supervisord.sh start regionserver"
++  remote_stop_rs="cd "$bin/supervisord"; ./hbase-supervisord.sh stop regionserver"
++  echo "Restarting regionserver"
++  "$bin"/regionservers.sh --hosts ${hosts} $remote_stop_rs
++  "$bin"/regionservers.sh --hosts ${hosts} $remote_start_rs
++  if [ "$reload" != "" ]; then
++    echo "Reloading $hostname region(s)"
++    HBASE_NOEXEC=true "$bin"/hbase --config ${HBASE_CONF_DIR} org.jruby.Main "$bin"/region_mover.rb --file=$filename $debug load $hostname
++    echo "Reloaded $hostname region(s)"
++  fi
++  restore_balancer
++  clean
++  echo "Done"
++  exit 0
++fi
++
+ if [ "$thrift" != "" ]; then
+   log "Stopping thrift"
+   "$bin"/hbase-daemons.sh --config ${HBASE_CONF_DIR} --hosts ${hosts} stop thrift
+@@ -124,11 +159,6 @@ if [ "$restart" != "" ]; then
+   fi
+ fi
+ 
+-# Restore balancer state
+-if [ $HBASE_BALANCER_STATE != "false" ]; then
+-  log "Restoring balancer state to " $HBASE_BALANCER_STATE
+-  log "balance_switch $HBASE_BALANCER_STATE" | "$bin"/hbase --config ${HBASE_CONF_DIR} shell &> /dev/null
+-fi
++restore_balancer
++clean
+ 
+-# Cleanup tmp files.
+-trap "rm -f  "/tmp/$(basename $0).*.tmp" &> /dev/null" EXIT
+diff --git bin/hbase-daemon.sh bin/hbase-daemon.sh
+index caa74d8..baad030 100755
+--- bin/hbase-daemon.sh
++++ bin/hbase-daemon.sh
+@@ -35,7 +35,7 @@
+ # Modelled after $HADOOP_HOME/bin/hadoop-daemon.sh
+ 
+ usage="Usage: hbase-daemon.sh [--config <conf-dir>]\
+- (start|stop|restart|autorestart) <hbase-command> \
++ (start|stop|restart|autorestart|clean_znode) <hbase-command> \
+  <args...>"
+ 
+ # if no args specified, show usage
+@@ -75,7 +75,7 @@ hbase_rotate_log ()
+ }
+ 
+ cleanZNode() {
+-  if [ -f $HBASE_ZNODE_FILE ]; then
++  if [ -f "$HBASE_ZNODE_FILE" ]; then
+     if [ "$command" = "master" ]; then
+       $bin/hbase master clear > /dev/null 2>&1
+     else
+@@ -272,6 +272,9 @@ case $startStop in
+     wait_until_done $!
+   ;;
+ 
++(clean_znode)
++    cleanZNode    
++  ;;
+ (*)
+   echo $usage
+   exit 1
+diff --git bin/supervisord/README.txt bin/supervisord/README.txt
+new file mode 100644
+index 0000000..e885d47
+--- /dev/null
++++ bin/supervisord/README.txt
+@@ -0,0 +1,14 @@
++This directory contains bash scripts that are used for running hbase processes 
++when they are contolled by python supervisor. Idea for controlling hbase with supervisor 
++was introduced in HBASE-7386.Requirement for using this scripts is that you install 
++suprvisor on all nodes in cluster. For details how to install supervisord plese visit:
++
++http://supervisord.org/installing.html
++
++Currently scripts are tested only on supervisor 3.0 version. Most of scripts are modeled 
++after hbase scripts in bin directory and heavily realy on them.
++Before running scripts against hbase cluster there are some basic test scrips in 
++test directory that should be used to determine are all nodes are configured correctly.
++
++In order to recive email notifications when master or regionsever process terminate please
++edit zk_cleaner.py and change email variable to your email address (email='someone@example.com').
+diff --git bin/supervisord/check-supervisord-hbase.sh bin/supervisord/check-supervisord-hbase.sh
+new file mode 100755
+index 0000000..0bf3c40
+--- /dev/null
++++ bin/supervisord/check-supervisord-hbase.sh
+@@ -0,0 +1,47 @@
++#!/usr/bin/env bash
++#
++#/**
++# * Licensed to the Apache Software Foundation (ASF) under one
++# * or more contributor license agreements.  See the NOTICE file
++# * distributed with this work for additional information
++# * regarding copyright ownership.  The ASF licenses this file
++# * to you under the Apache License, Version 2.0 (the
++# * "License"); you may not use this file except in compliance
++# * with the License.  You may obtain a copy of the License at
++# *
++# *     http://www.apache.org/licenses/LICENSE-2.0
++# *
++# * Unless required by applicable law or agreed to in writing, software
++# * distributed under the License is distributed on an "AS IS" BASIS,
++# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# * See the License for the specific language governing permissions and
++# * limitations under the License.
++# */
++
++
++# Check status of hbase processes controled by supervisord.
++# Run this on master node.
++usage="Usage: check-supervisord-hbase.sh [--config <conf-dir>]"
++
++this_dir=`dirname "${BASH_SOURCE-$0}"`
++this_dir=`cd "$this_dir">/dev/null; pwd`
++. "$this_dir"/load-config.sh
++
++remote_cmd="$SUPERVISORCTL -c $SV_CONF_FILE status"
++# HBASE-6504 - only take the first line of the output in case verbose gc is on
++distMode=`$HBASE_BIN_DIR/hbase --config "$HBASE_CONF_DIR" org.apache.hadoop.hbase.util.HBaseConfTool hbase.cluster.distributed | head -n 1`
++
++if [ "$distMode" == 'false' ] 
++then
++  $SUPERVISORCTL -c $SV_CONF_FILE status hbase-MASTER
++else
++  "$HBASE_BIN_DIR"/zookeepers.sh $remote_cmd  hbase-ZK
++  echo "**************************************************************************"
++  $SUPERVISORCTL -c $SV_CONF_FILE status hbase-MASTER
++  echo "**************************************************************************"
++  "$HBASE_BIN_DIR"/regionservers.sh $remote_cmd hbase-RS
++  echo "**************************************************************************"
++  # Longer version of command since master-backup.sh pass --backup argument.
++  "$HBASE_BIN_DIR"/master-backup.sh $remote_cmd hbase-BKPMASTER | head -n 1
++  echo "**************************************************************************"
++fi
+diff --git bin/supervisord/hbase-supervisorctl.sh bin/supervisord/hbase-supervisorctl.sh
+new file mode 100755
+index 0000000..24dd62e
+--- /dev/null
++++ bin/supervisord/hbase-supervisorctl.sh
+@@ -0,0 +1,28 @@
++#!/usr/bin/env bash
++#
++#/**
++# * Licensed to the Apache Software Foundation (ASF) under one
++# * or more contributor license agreements.  See the NOTICE file
++# * distributed with this work for additional information
++# * regarding copyright ownership.  The ASF licenses this file
++# * to you under the Apache License, Version 2.0 (the
++# * "License"); you may not use this file except in compliance
++# * with the License.  You may obtain a copy of the License at
++# *
++# *     http://www.apache.org/licenses/LICENSE-2.0
++# *
++# * Unless required by applicable law or agreed to in writing, software
++# * distributed under the License is distributed on an "AS IS" BASIS,
++# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# * See the License for the specific language governing permissions and
++# * limitations under the License.
++# */
++
++# Start interactive supervisor shell
++usage="Usage: hbase-supervisordctl.sh [--config <conf-dir>]"
++
++this_dir=`dirname "${BASH_SOURCE-$0}"`
++this_dir=`cd "$this_dir">/dev/null; pwd`
++. $this_dir/load-config.sh
++
++$SUPERVISORCTL -c "$SV_CONF_FILE" $1
+diff --git bin/supervisord/hbase-supervisord.sh bin/supervisord/hbase-supervisord.sh
+new file mode 100755
+index 0000000..a8528a6
+--- /dev/null
++++ bin/supervisord/hbase-supervisord.sh
+@@ -0,0 +1,147 @@
++#!/usr/bin/env bash
++#
++#/**
++# * Licensed to the Apache Software Foundation (ASF) under one
++# * or more contributor license agreements.  See the NOTICE file
++# * distributed with this work for additional information
++# * regarding copyright ownership.  The ASF licenses this file
++# * to you under the Apache License, Version 2.0 (the
++# * "License"); you may not use this file except in compliance
++# * with the License.  You may obtain a copy of the License at
++# *
++# *     http://www.apache.org/licenses/LICENSE-2.0
++# *
++# * Unless required by applicable law or agreed to in writing, software
++# * distributed under the License is distributed on an "AS IS" BASIS,
++# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# * See the License for the specific language governing permissions and
++# * limitations under the License.
++# */
++
++# This script controls hbase procceses inside supervisord.
++usage="Usage: hbase-supervisord.sh [--config <conf-dir>]\
++ (start|stop|restart) <master|regionserver|backupmaster|zookeeper \
++		       rest|thrift|thrift2>"
++
++# if no args specified, show usage
++if [ $# -le 1 ]; then
++  echo $usage
++  exit 1
++fi
++
++this_dir=`dirname "${BASH_SOURCE-$0}"`
++this_dir=`cd "$this_dir">/dev/null; pwd`
++. $this_dir/load-config.sh
++
++
++# Check is supervisord is running if not start it
++PROC_NAME="supervisord"
++STATUS3=`ps -ef | grep -v grep | grep $PROC_NAME | grep "hbase-supervisord.conf" >/dev/null; echo $?`
++if [ $STATUS3 -ne "0" ]; then
++  echo "$PROC_NAME is not running. Starting $PROC_NAME ..."
++  $SUPERVISORD -c $SV_CONF_FILE
++  if [ $? -ne "0" ]; then
++    echo "ERROR: Unable to start $PROC_NAME"
++    exit -1
++  fi
++fi
++
++
++# get aruments
++startStop=$1
++MasterRS=$2
++
++case $startStop in
++(start)
++  if [ "$MasterRS" == "master" ]
++  then
++    $SUPERVISORCTL -c $SV_CONF_FILE start hbase-MASTER
++  elif [ "$MasterRS" == "regionserver" ]
++  then
++    $SUPERVISORCTL -c $SV_CONF_FILE start hbase-RS
++  elif [ "$MasterRS" == "backupmaster" ]
++    then
++      $SUPERVISORCTL -c $SV_CONF_FILE start hbase-BKPMASTER
++  elif [ "$MasterRS" == "zookeeper" ]
++      then
++      if [ "$HBASE_MANAGES_ZK" = "false" ]; then :
++      else
++        $SUPERVISORCTL -c $SV_CONF_FILE start hbase-ZK
++      fi
++  elif [ "$MasterRS" == "rest" ]
++    then
++    $SUPERVISORCTL -c $SV_CONF_FILE start hbase-REST
++  elif [ "$MasterRS" == "thrift" ]
++    then
++    $SUPERVISORCTL -c $SV_CONF_FILE start hbase-THRIFT
++  elif [ "$MasterRS" == "thrift2" ]
++    then
++    $SUPERVISORCTL -c $SV_CONF_FILE start hbase-THRIFT2
++  else
++    echo "$2 is not valid argument"
++  fi
++;;
++
++(stop)
++  if [ "$MasterRS" == "master" ]
++  then
++    $SUPERVISORCTL -c $SV_CONF_FILE stop hbase-MASTER
++  elif [ "$MasterRS" == "regionserver" ]
++  then
++    $SUPERVISORCTL -c $SV_CONF_FILE stop hbase-RS
++  elif [ "$MasterRS" == "backupmaster" ]
++    then
++      $SUPERVISORCTL -c $SV_CONF_FILE stop hbase-BKPMASTER
++  elif [ "$MasterRS" == "zookeeper" ]
++      then
++      if [ "$HBASE_MANAGES_ZK" = "false" ]; then :
++      else
++        $SUPERVISORCTL -c $SV_CONF_FILE stop hbase-ZK
++      fi
++  elif [ "$MasterRS" == "rest" ]
++    then
++    $SUPERVISORCTL -c $SV_CONF_FILE stop hbase-REST
++  elif [ "$MasterRS" == "thrift" ]
++    then
++    $SUPERVISORCTL -c $SV_CONF_FILE stop hbase-THRIFT
++  elif [ "$MasterRS" == "thrift2" ]
++    then
++    $SUPERVISORCTL -c $SV_CONF_FILE stop hbase-THRIFT2
++  else
++    echo "$2 is not valid argument"
++  fi
++;;
++(restart)
++if [ "$MasterRS" == "master" ]
++  then
++    $SUPERVISORCTL -c $SV_CONF_FILE restart hbase-MASTER
++  elif [ "$MasterRS" == "regionserver" ]
++  then
++    $SUPERVISORCTL -c $SV_CONF_FILE restart hbase-RS
++  elif [ "$MasterRS" == "backupmaster" ]
++    then
++      $SUPERVISORCTL -c $SV_CONF_FILE restart hbase-BKPMASTER
++  elif [ "$MasterRS" == "zookeeper" ]
++      then
++      if [ "$HBASE_MANAGES_ZK" = "false" ]; then :
++      else
++        $SUPERVISORCTL -c $SV_CONF_FILE restart hbase-ZK
++      fi
++  elif [ "$MasterRS" == "rest" ]
++    then
++    $SUPERVISORCTL -c $SV_CONF_FILE restart hbase-REST
++  elif [ "$MasterRS" == "thrift" ]
++    then
++    $SUPERVISORCTL -c $SV_CONF_FILE restart hbase-THRIFT
++  elif [ "$MasterRS" == "thrift2" ]
++    then
++    $SUPERVISORCTL -c $SV_CONF_FILE restart hbase-THRIFT2
++  else
++    echo "$2 is not valid argument"
++  fi
++;;
++(*)
++  echo $usage
++  exit 1
++  ;;
++esac
+diff --git bin/supervisord/load-config.sh bin/supervisord/load-config.sh
+new file mode 100755
+index 0000000..03d11d6
+--- /dev/null
++++ bin/supervisord/load-config.sh
+@@ -0,0 +1,47 @@
++#!/bin/bash
++#
++#/**
++# * Licensed to the Apache Software Foundation (ASF) under one
++# * or more contributor license agreements.  See the NOTICE file
++# * distributed with this work for additional information
++# * regarding copyright ownership.  The ASF licenses this file
++# * to you under the Apache License, Version 2.0 (the
++# * "License"); you may not use this file except in compliance
++# * with the License.  You may obtain a copy of the License at
++# *
++# *     http://www.apache.org/licenses/LICENSE-2.0
++# *
++# * Unless required by applicable law or agreed to in writing, software
++# * distributed under the License is distributed on an "AS IS" BASIS,
++# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# * See the License for the specific language governing permissions and
++# * limitations under the License.
++# */
++
++# Source hbase-config.sh and add some supervisord related vars
++# Modelled after hbase-conf.sh
++
++this_dir=`dirname "${BASH_SOURCE-$0}"`
++this_dir=`cd "$this_dir">/dev/null; pwd`
++
++hbase_bin_dir=`dirname "$this_dir"`
++. "$hbase_bin_dir"/hbase-config.sh
++
++# Create logs dir if don't exist
++mkdir -p "$HBASE_HOME"/logs
++
++
++HBASE_BIN_DIR="$hbase_bin_dir"
++SV_CONF_DIR="$HBASE_CONF_DIR/supervisord"
++SV_CONF_FILE="$SV_CONF_DIR/hbase-supervisord.conf"
++
++# check is python supervisor is installed
++STATUS1=`type supervisord &>/dev/null; echo $?`
++STATUS2=`type supervisorctl &>/dev/null; echo $?`
++if [ $STATUS1 -ne "0" ] || [ $STATUS2 -ne "0" ]; then
++  echo "supervisor not installed exiting..!"
++    exit -1
++  else
++  SUPERVISORD=`type -p supervisord`
++  SUPERVISORCTL=`type -p supervisorctl`
++fi
+diff --git bin/supervisord/migrate_to_supervisord.sh bin/supervisord/migrate_to_supervisord.sh
+new file mode 100755
+index 0000000..c99c21a
+--- /dev/null
++++ bin/supervisord/migrate_to_supervisord.sh
+@@ -0,0 +1,63 @@
++#!/usr/bin/env bash
++#
++#/**
++# * Licensed to the Apache Software Foundation (ASF) under one
++# * or more contributor license agreements.  See the NOTICE file
++# * distributed with this work for additional information
++# * regarding copyright ownership.  The ASF licenses this file
++# * to you under the Apache License, Version 2.0 (the
++# * "License"); you may not use this file except in compliance
++# * with the License.  You may obtain a copy of the License at
++# *
++# *     http://www.apache.org/licenses/LICENSE-2.0
++# *
++# * Unless required by applicable law or agreed to in writing, software
++# * distributed under the License is distributed on an "AS IS" BASIS,
++# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# * See the License for the specific language governing permissions and
++# * limitations under the License.
++# */
++
++
++# Stop hbase daemons using scripts and start them inside supervisord.
++# Run this on master node.
++usage="Usage: $0 [--config <conf_dir>]"
++
++this_dir=`dirname "${BASH_SOURCE-$0}"`
++this_dir=`cd "$this_dir">/dev/null; pwd`
++. "$this_dir"/load-config.sh
++
++RS_HOSTLIST=`cat "${HBASE_CONF_DIR}"/regionservers`
++
++remote_cmd_rs="cd "$this_dir"; ./hbase-supervisord.sh start regionserver"
++remote_cmd_zk="cd "$this_dir"; ./hbase-supervisord.sh start zookeeper"
++remote_cmd_bkpmaster="cd "$this_dir"; ./hbase-supervisord.sh start backupmaster"
++
++remote_stop_rs="cd "$HBASE_BIN_DIR"; ./hbase-daemon.sh stop regionserver"
++remote_stop_zk="cd "$HBASE_BIN_DIR"; ./hbase-daemon.sh stop zookeeper"
++remote_stop_bkpmaster="cd "$HBASE_BIN_DIR"; ./hbase-daemon.sh stop master"
++
++# HBASE-6504 - only take the first line of the output in case verbose gc is on
++distMode=`"$HBASE_BIN_DIR"/hbase --config "$HBASE_CONF_DIR" org.apache.hadoop.hbase.util.HBaseConfTool hbase.cluster.distributed | head -n 1`
++
++export HBASE_SLAVE_PARALLEL=false
++
++if [ "$distMode" == 'false' ] 
++then
++  "$HBASE_BIN_DIR"/hbase-daemon.sh stop master
++  "$this_dir"/hbase-supervisord.sh start master
++else
++  "$HBASE_BIN_DIR"/zookeepers.sh $remote_stop_zk
++  "$HBASE_BIN_DIR"/zookeepers.sh $remote_cmd_zk
++  "$HBASE_BIN_DIR"/hbase-daemon.sh stop master
++  "$this_dir"/hbase-supervisord.sh start master
++  # Rolling restart regionservers
++  for rs in $RS_HOSTLIST; do
++    #Create hosts file for host
++    echo $rs > /tmp/hosts-$rs
++    "$HBASE_BIN_DIR"/regionservers.sh --hosts /tmp/hosts-$rs $remote_stop_rs
++    "$HBASE_BIN_DIR"/regionservers.sh --hosts /tmp/hosts-$rs $remote_cmd_rs
++  done
++  "$HBASE_BIN_DIR"/master-backup.sh $remote_stop_bkpmaster
++  "$HBASE_BIN_DIR"/master-backup.sh $remote_cmd_bkpmaster
++fi
+diff --git bin/supervisord/restart-supervisord-hbase.sh bin/supervisord/restart-supervisord-hbase.sh
+new file mode 100755
+index 0000000..c52eda8
+--- /dev/null
++++ bin/supervisord/restart-supervisord-hbase.sh
+@@ -0,0 +1,44 @@
++#!/usr/bin/env bash
++#
++#/**
++# * Licensed to the Apache Software Foundation (ASF) under one
++# * or more contributor license agreements.  See the NOTICE file
++# * distributed with this work for additional information
++# * regarding copyright ownership.  The ASF licenses this file
++# * to you under the Apache License, Version 2.0 (the
++# * "License"); you may not use this file except in compliance
++# * with the License.  You may obtain a copy of the License at
++# *
++# *     http://www.apache.org/licenses/LICENSE-2.0
++# *
++# * Unless required by applicable law or agreed to in writing, software
++# * distributed under the License is distributed on an "AS IS" BASIS,
++# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# * See the License for the specific language governing permissions and
++# * limitations under the License.
++# */
++
++
++# Restart hbase daemons inside supervisord.
++# Run this on master node.
++usage="Usage: $0 [--config <conf-dir>]"
++
++this_dir=`dirname "${BASH_SOURCE-$0}"`
++this_dir=`cd "$this_dir">/dev/null; pwd`
++. "$this_dir"/load-config.sh
++
++remote_cmd_rs="cd "$this_dir"; ./hbase-supervisord.sh restart regionserver"
++remote_cmd_zk="cd "$this_dir"; ./hbase-supervisord.sh restart zookeeper"
++remote_cmd_bkpmaster="cd $this_dir; ./hbase-supervisord.sh restart backupmaster"
++# HBASE-6504 - only take the first line of the output in case verbose gc is on
++distMode=`"$HBASE_BIN_DIR"/hbase --config "$HBASE_CONF_DIR" org.apache.hadoop.hbase.util.HBaseConfTool hbase.cluster.distributed | head -n 1`
++
++if [ "$distMode" == 'false' ] 
++then
++  "$this_dir"/hbase-supervisord.sh restart master
++else
++  "$HBASE_BIN_DIR"/zookeepers.sh $remote_cmd_zk
++  "$this_dir"/hbase-supervisord.sh restart master
++  "$HBASE_BIN_DIR"/regionservers.sh $remote_cmd_rs
++  "$HBASE_BIN_DIR"/master-backup.sh $remote_cmd_bkpmaster
++fi
+diff --git bin/supervisord/revert_to_scripts.sh bin/supervisord/revert_to_scripts.sh
+new file mode 100755
+index 0000000..e8b457f
+--- /dev/null
++++ bin/supervisord/revert_to_scripts.sh
+@@ -0,0 +1,61 @@
++#!/usr/bin/env bash
++#
++#/**
++# * Licensed to the Apache Software Foundation (ASF) under one
++# * or more contributor license agreements.  See the NOTICE file
++# * distributed with this work for additional information
++# * regarding copyright ownership.  The ASF licenses this file
++# * to you under the Apache License, Version 2.0 (the
++# * "License"); you may not use this file except in compliance
++# * with the License.  You may obtain a copy of the License at
++# *
++# *     http://www.apache.org/licenses/LICENSE-2.0
++# *
++# * Unless required by applicable law or agreed to in writing, software
++# * distributed under the License is distributed on an "AS IS" BASIS,
++# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# * See the License for the specific language governing permissions and
++# * limitations under the License.
++# */
++
++
++# Stop hbase processes running in supervisord and start hbase using standard scripts.
++# Run this on master node.
++usage="Usage: $0"
++
++this_dir=`dirname "${BASH_SOURCE-$0}"`
++this_dir=`cd "$this_dir">/dev/null; pwd`
++. "$this_dir"/load-config.sh
++
++RS_HOSTLIST=`cat "${HBASE_CONF_DIR}"/regionservers`
++
++remote_cmd_rs="cd "$this_dir"; ./hbase-supervisord.sh stop regionserver"
++remote_cmd_zk="cd "$this_dir"; ./hbase-supervisord.sh stop zookeeper"
++remote_cmd_bkpmaster="cd $this_dir; ./hbase-supervisord.sh stop backupmaster"
++
++remote_start_rs="cd "$HBASE_BIN_DIR"; ./hbase-daemon.sh start regionserver"
++remote_start_zk="cd "$HBASE_BIN_DIR"; ./hbase-daemon.sh start zookeeper"
++remote_start_bkpmaster="cd "$HBASE_BIN_DIR"; ./hbase-daemon.sh start master --backup"
++# HBASE-6504 - only take the first line of the output in case verbose gc is on
++distMode=`"$HBASE_BIN_DIR"/hbase --config "$HBASE_CONF_DIR" org.apache.hadoop.hbase.util.HBaseConfTool hbase.cluster.distributed | head -n 1`
++
++
++if [ "$distMode" == 'false' ] 
++then
++  "$this_dir"/hbase-supervisord.sh stop master
++  "$HBASE_BIN_DIR"/hbase-daemon.sh start master
++else
++  "$HBASE_BIN_DIR"/zookeepers.sh $remote_cmd_zk
++  "$HBASE_BIN_DIR"/zookeepers.sh $remote_start_zk
++  "$this_dir"/hbase-supervisord.sh stop master
++  "$HBASE_BIN_DIR"/hbase-daemon.sh start master
++  # Rolling restart  regionservers
++  for rs in $RS_HOSTLIST; do
++    #Create hosts file for host
++    echo $rs > /tmp/hosts-$rs
++    "$HBASE_BIN_DIR"/regionservers.sh --hosts /tmp/hosts-$rs $remote_cmd_rs
++    "$HBASE_BIN_DIR"/regionservers.sh --hosts /tmp/hosts-$rs $remote_start_rs
++  done
++  "$HBASE_BIN_DIR"/master-backup.sh $remote_cmd_bkpmaster
++  "$HBASE_BIN_DIR"/master-backup.sh $remote_start_bkpmaster
++fi
+diff --git bin/supervisord/rolling-restart.sh bin/supervisord/rolling-restart.sh
+new file mode 100755
+index 0000000..e98a986
+--- /dev/null
++++ bin/supervisord/rolling-restart.sh
+@@ -0,0 +1,62 @@
++#!/bin/bash
++#
++#/**
++# * Licensed to the Apache Software Foundation (ASF) under one
++# * or more contributor license agreements.  See the NOTICE file
++# * distributed with this work for additional information
++# * regarding copyright ownership.  The ASF licenses this file
++# * to you under the Apache License, Version 2.0 (the
++# * "License"); you may not use this file except in compliance
++# * with the License.  You may obtain a copy of the License at
++# *
++# *     http://www.apache.org/licenses/LICENSE-2.0
++# *
++# * Unless required by applicable law or agreed to in writing, software
++# * distributed under the License is distributed on an "AS IS" BASIS,
++# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# * See the License for the specific language governing permissions and
++# * limitations under the License.
++# */
++# 
++# Run this on master node.
++usage="Usage: rolling-restart.sh [--config <conf-dir>] masters|regionservers|all"
++
++this_dir=`dirname "${BASH_SOURCE-$0}"`
++this_dir=`cd "$this_dir">/dev/null; pwd`
++. $this_dir/load-config.sh
++
++LOG_FILE="/tmp/hbase-rolling-restart.log"
++remote_stop_bkpmaster="cd $this_dir; ./hbase-supervisord.sh stop backupmaster"
++remote_start_bkpmaster="cd $this_dir; ./hbase-supervisord.sh start backupmaster"
++
++roll_regionservers() {
++  for i in `cat $HBASE_CONF_DIR/regionservers|sort`; do 
++    "$HBASE_BIN_DIR"/graceful_stop.sh --supervisor --restart --reload --debug $i; done &> $LOG_FILE &
++}
++
++roll_masters() {
++  "$this_dir"/hbase-supervisord.sh stop master
++  "$this_dir"/hbase-supervisord.sh start master
++  "$HBASE_BIN_DIR"/master-backup.sh $remote_stop_bkpmaster
++  "$HBASE_BIN_DIR"/master-backup.sh $remote_start_bkpmaster
++}
++
++case $1 in
++(masters)
++  roll_masters
++;;
++(regionservers)
++  roll_regionservers
++  echo "Rolling restart of regionsevers in progress... Please check $LOG_FILE."
++;;
++(all)
++  roll_masters
++  roll_regionservers
++  echo "Rolling restart of regionsevers in progress... Please check $LOG_FILE."
++;;
++(*)
++  echo $usage
++  exit 1
++  ;;
++esac
++
+diff --git bin/supervisord/start-supervisord-hbase.sh bin/supervisord/start-supervisord-hbase.sh
+new file mode 100755
+index 0000000..c325604
+--- /dev/null
++++ bin/supervisord/start-supervisord-hbase.sh
+@@ -0,0 +1,44 @@
++#!/usr/bin/env bash
++#
++#/**
++# * Licensed to the Apache Software Foundation (ASF) under one
++# * or more contributor license agreements.  See the NOTICE file
++# * distributed with this work for additional information
++# * regarding copyright ownership.  The ASF licenses this file
++# * to you under the Apache License, Version 2.0 (the
++# * "License"); you may not use this file except in compliance
++# * with the License.  You may obtain a copy of the License at
++# *
++# *     http://www.apache.org/licenses/LICENSE-2.0
++# *
++# * Unless required by applicable law or agreed to in writing, software
++# * distributed under the License is distributed on an "AS IS" BASIS,
++# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# * See the License for the specific language governing permissions and
++# * limitations under the License.
++# */
++
++
++# Start hbase daemons inside supervisord.
++# Run this on master node.
++usage="Usage: start-supervisord-hbase.sh [--config <conf-dir>]"
++
++this_dir=`dirname "${BASH_SOURCE-$0}"`
++this_dir=`cd "$this_dir">/dev/null; pwd`
++. "$this_dir"/load-config.sh
++
++remote_cmd_rs="cd "$this_dir"; ./hbase-supervisord.sh start regionserver"
++remote_cmd_zk="cd "$this_dir"; ./hbase-supervisord.sh start zookeeper"
++remote_cmd_bkpmaster="cd $this_dir; ./hbase-supervisord.sh start backupmaster"
++# HBASE-6504 - only take the first line of the output in case verbose gc is on
++distMode=`"$HBASE_BIN_DIR"/hbase --config "$HBASE_CONF_DIR" org.apache.hadoop.hbase.util.HBaseConfTool hbase.cluster.distributed | head -n 1`
++
++if [ "$distMode" == 'false' ] 
++then
++  "$this_dir"/hbase-supervisord.sh start master
++else
++  "$HBASE_BIN_DIR"/zookeepers.sh $remote_cmd_zk
++  "$this_dir"/hbase-supervisord.sh start master
++  "$HBASE_BIN_DIR"/regionservers.sh $remote_cmd_rs
++  "$HBASE_BIN_DIR"/master-backup.sh $remote_cmd_bkpmaster
++fi
+diff --git bin/supervisord/stop-supervisord-hbase.sh bin/supervisord/stop-supervisord-hbase.sh
+new file mode 100755
+index 0000000..8410755
+--- /dev/null
++++ bin/supervisord/stop-supervisord-hbase.sh
+@@ -0,0 +1,44 @@
++#!/usr/bin/env bash
++#
++#/**
++# * Licensed to the Apache Software Foundation (ASF) under one
++# * or more contributor license agreements.  See the NOTICE file
++# * distributed with this work for additional information
++# * regarding copyright ownership.  The ASF licenses this file
++# * to you under the Apache License, Version 2.0 (the
++# * "License"); you may not use this file except in compliance
++# * with the License.  You may obtain a copy of the License at
++# *
++# *     http://www.apache.org/licenses/LICENSE-2.0
++# *
++# * Unless required by applicable law or agreed to in writing, software
++# * distributed under the License is distributed on an "AS IS" BASIS,
++# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# * See the License for the specific language governing permissions and
++# * limitations under the License.
++# */
++
++
++# Start hbase daemons inside supervisord.
++# Run this on master node.
++usage="Usage: stop-supervisord-hbase.sh [--config <conf-dir>]"
++
++this_dir=`dirname "${BASH_SOURCE-$0}"`
++this_dir=`cd "$this_dir">/dev/null; pwd`
++. "$this_dir"/load-config.sh
++
++remote_cmd_rs="cd "$this_dir"; ./hbase-supervisord.sh stop regionserver"
++remote_cmd_zk="cd "$this_dir"; ./hbase-supervisord.sh stop zookeeper"
++remote_cmd_bkpmaster="cd $this_dir; ./hbase-supervisord.sh stop backupmaster"
++# HBASE-6504 - only take the first line of the output in case verbose gc is on
++distMode=`"$HBASE_BIN_DIR"/hbase --config "$HBASE_CONF_DIR" org.apache.hadoop.hbase.util.HBaseConfTool hbase.cluster.distributed | head -n 1`
++
++if [ "$distMode" == 'false' ] 
++then
++  "$this_dir"/hbase-supervisord.sh stop master
++else
++  "$HBASE_BIN_DIR"/zookeepers.sh $remote_cmd_zk
++  "$this_dir"/hbase-supervisord.sh stop master
++  "$HBASE_BIN_DIR"/regionservers.sh $remote_cmd_rs
++  "$HBASE_BIN_DIR"/master-backup.sh $remote_cmd_bkpmaster
++fi
+diff --git bin/supervisord/test/RunTests.sh bin/supervisord/test/RunTests.sh
+new file mode 100755
+index 0000000..daf0320
+--- /dev/null
++++ bin/supervisord/test/RunTests.sh
+@@ -0,0 +1,44 @@
++#!/usr/bin/env bash
++#
++#/**
++# * Licensed to the Apache Software Foundation (ASF) under one
++# * or more contributor license agreements.  See the NOTICE file
++# * distributed with this work for additional information
++# * regarding copyright ownership.  The ASF licenses this file
++# * to you under the Apache License, Version 2.0 (the
++# * "License"); you may not use this file except in compliance
++# * with the License.  You may obtain a copy of the License at
++# *
++# *     http://www.apache.org/licenses/LICENSE-2.0
++# *
++# * Unless required by applicable law or agreed to in writing, software
++# * distributed under the License is distributed on an "AS IS" BASIS,
++# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# * See the License for the specific language governing permissions and
++# * limitations under the License.
++# */
++
++
++# Run Test.sh on cluster nodes.
++# Run this on master node.
++usage="Usage: $0"
++
++test_dir=`dirname "${BASH_SOURCE-$0}"`
++test_dir=`cd "$test_dir">/dev/null; pwd`
++sv_dir=`dirname $test_dir`
++. "$sv_dir"/load-config.sh
++
++remote_cmd="cd "$test_dir"; ./Tests.sh"
++echo "Testing ZK slaves..."
++"$HBASE_BIN_DIR"/zookeepers.sh $remote_cmd
++echo "*********************"
++echo
++echo "Testing master machine"
++"$test_dir"/Tests.sh
++echo 
++echo "Testing regionservers  machines"
++"$HBASE_BIN_DIR"/regionservers.sh $remote_cmd
++echo 
++echo "Testing backup master machine"
++"$HBASE_BIN_DIR"/master-backup.sh $remote_cmd
++echo 
+diff --git bin/supervisord/test/Tests.sh bin/supervisord/test/Tests.sh
+new file mode 100755
+index 0000000..ed16ef1
+--- /dev/null
++++ bin/supervisord/test/Tests.sh
+@@ -0,0 +1,77 @@
++#!/bin/bash
++# * Licensed to the Apache Software Foundation (ASF) under one
++# * or more contributor license agreements.  See the NOTICE file
++# * distributed with this work for additional information
++# * regarding copyright ownership.  The ASF licenses this file
++# * to you under the Apache License, Version 2.0 (the
++# * "License"); you may not use this file except in compliance
++# * with the License.  You may obtain a copy of the License at
++# *
++# *     http://www.apache.org/licenses/LICENSE-2.0
++# *
++# * Unless required by applicable law or agreed to in writing, software
++# * distributed under the License is distributed on an "AS IS" BASIS,
++# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# * See the License for the specific language governing permissions and
++# * limitations under the License.
++# */
++
++# Some basic testing for scripts and supervisord
++usage="Usage: $0"
++
++test_dir=`dirname "${BASH_SOURCE-$0}"`
++test_dir=`cd "$test_dir">/dev/null; pwd`
++sv_dir=`dirname "$test_dir"`
++. $sv_dir/load-config.sh
++
++SOCKET_FILE="/tmp/TEST.sock"
++
++echo "####### Environmet variables ####"
++echo "HBASE_HOME=$HBASE_HOME"
++echo "SV_CONF_DIR=$SV_CONF_DIR"
++echo "SV_CONF_FILE=$SV_CONF_FILE"
++echo "HBASE_MANAGE_ZK=$HBASE_MANAGE_ZK"
++echo "HBASE_CONF_DIR=$HBASE_CONF_DIR"
++echo "HBASE_BIN_DIR=$HBASE_BIN_DIR"
++echo "######### END ###################"
++
++# Test can we load hbase settings form hbase-env.sh
++test_load_config() {
++  if [ -z "${HBASE_OPTS+aaa}" ]; then 
++    echo "Loading hbase-env.sh... [!FAILED]"
++  else
++    echo "Loading hbase-env.sh... [+PASSED]"
++  fi
++}
++
++# Test is python supervisor is installed
++test_is_sv_installed() {
++  STATUS1=`type supervisord &>/dev/null; echo $?`
++  STATUS2=`type supervisorctl &>/dev/null; echo $?`
++  if [ $STATUS1 -ne "0" ] || [ $STATUS2 -ne "0" ]; then
++    echo "Test is supevisored installed...[!FAILED]"
++  else
++    echo "Test is supevisored installed...[+PASSED]"
++  fi
++}
++
++test_supervisord() {
++  supervisord -c $SV_CONF_DIR/TEST.conf &>/dev/null
++  if [ $? -eq "0" ] && [ -S "$SOCKET_FILE" ]; then
++    echo "supervisord start test [+PASSED]"
++  else
++    echo "supervisord start test [!FAILED]"
++  fi
++  supervisorctl -c $SV_CONF_DIR/TEST.conf status
++  if [ $? -eq "0" ]; then
++    echo "supervisorctl test [+PASSED]"
++  else
++    echo "supervisorctl test [+FAILED]"
++  fi
++  supervisorctl -c $SV_CONF_DIR/TEST.conf shutdown  &>/dev/null
++}
++
++test_load_config
++test_is_sv_installed
++test_supervisord
++echo "********************"
+diff --git bin/supervisord/zk_cleaner.py bin/supervisord/zk_cleaner.py
+new file mode 100644
+index 0000000..dc4d870
+--- /dev/null
++++ bin/supervisord/zk_cleaner.py
+@@ -0,0 +1,84 @@
++#/**
++# * Licensed to the Apache Software Foundation (ASF) under one
++# * or more contributor license agreements.  See the NOTICE file
++# * distributed with this work for additional information
++# * regarding copyright ownership.  The ASF licenses this file
++# * to you under the Apache License, Version 2.0 (the
++# * "License"); you may not use this file except in compliance
++# * with the License.  You may obtain a copy of the License at
++# *
++# *     http://www.apache.org/licenses/LICENSE-2.0
++# *
++# * Unless required by applicable law or agreed to in writing, software
++# * distributed under the License is distributed on an "AS IS" BASIS,
++# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# * See the License for the specific language governing permissions and
++# * limitations under the License.
++# */
++# 
++# Supervisord event listener which removes znode when regionserver
++# crash and send mail notification about that event. 
++# For more details how to use events with supervisord see:
++# http://supervisord.org/events.html#event-listeners-and-event-notifications
++
++import subprocess, sys, os
++from datetime import datetime
++from supervisor import childutils
++
++# List of states that we want to track with listener
++PROCESS_STATE_LIST = [
++            'PROCESS_STATE_STOPPING',
++            'PROCESS_STATE_EXITED',
++            'PROCESS_STATE_UNKNOWN',
++]
++# Email address for notifications when process change state (optional)
++email=""
++# Tmp file where we write message about events 
++tmp_file="/tmp/sv_events.txt"
++# Absolute path to HBASE_HOME. 
++hbase_home= os.path.abspath('../..')
++
++user = os.getenv("USER")
++
++def write_stdout(s):
++  sys.stdout.write(s)
++  sys.stdout.flush()
++
++def write_stderr(s):
++  sys.stderr.write(s)
++  sys.stderr.flush()
++
++# Send email function using system mail command to send email
++def send_mail():
++  if email != "":
++    subprocess.call('/bin/mail -s "HBASE_PROCESS_EVENT" %s < %s'%(email, tmp_file), shell=True)
++  else:
++    pass
++
++def main(argv=sys.argv):
++  while 1:
++    h, p = childutils.listener.wait(sys.stdin, sys.stdout)
++    if not h['eventname'] in PROCESS_STATE_LIST:
++      childutils.listener.ok(sys.stdout)
++      continue
++    ph, pd = childutils.eventdata(p+'\n')
++    rsmsg=""
++    if ph.get('processname') == 'hbase-RS':
++     fh = open('/tmp/hbase-%s-regionserver.znode'%user, "r")
++     znode = fh.read()
++     fh.close()
++     subprocess.call("%s/bin/hbase-daemon.sh clean_znode regionserver" %(hbase_home), shell=True) 
++     rsmsg = "\nRS znode removed: " + znode
++    message = "Process %s (pid %s) fired event %s from state %s at %s" % \
++	      (ph.get('processname'), ph.get('pid'), h.get('eventname'), 
++	      ph.get('from_state'),datetime.now()) + rsmsg
++
++    fd = open(tmp_file, "w")
++    fd.write(message)
++    fd.close()
++    send_mail()
++    childutils.listener.ok(sys.stdout)
++    continue
++
++if __name__ == '__main__':
++  main()
