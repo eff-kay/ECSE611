@@ -39,6 +39,7 @@ def fileParse(filepath):
     for key, val in mapID.items():
         if len(val) > 1:
             ipCommits[key] = val
+
     pp.pprint(ipCommits)
 
     # for defectNum in mapID.keys():

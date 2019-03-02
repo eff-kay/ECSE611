@@ -1,0 +1,6 @@
+f0032c925510877396b1b0979abcc2ce83e67529&=&HBASE-20587 Replace Jackson with shaded thirdparty gson
+482b505796e1dfe33551c1d20af2ff9d1d6a38dc&=&HBASE-21505 - proposal for a more consistent report on status
+dfb95cfd833233671543a20189c8dd8ed0a0b7e8&=&HBASE-21938 Add a new ClusterMetrics.Option SERVERS_NAME to only return the live region servers's name without metrics
+02690b429ff3ed2504b43a8c47d0242da5af0f5e&=&HBASE-17094 Add a sitemap for hbase.apache.org
+9a55cbb2c1dfe5a13a6ceb323ac7edd23532f4b5&=&HBASE-21783 Support exceed user/table/ns throttle quota if region server has available quota
+72df52283b6c1b60252f6d78ade32a23a59197d5&=&HBASE-21867 Support multi-threads in HFileArchiver
