@@ -7,9 +7,16 @@ class ClassChecker:
 
     def __init__(self, potential):
         self.potential = potential
+        self._is_class = None
 
     @property
     def is_class(self):
+        if self._is_class is None:
+            self._is_class = self._check()
+
+        return self._is_class
+
+    def _check(self):
         if not self.potential:
             return False
 
@@ -21,6 +28,9 @@ class ClassChecker:
 
     @property
     def class_signature(self):
+        if not self.is_class:
+            return None
+
         return re.search(r'.*class\s([A-Z]\w+)', self.potential).group()
 
     def __bool__(self):

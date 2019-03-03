@@ -3,15 +3,33 @@ import re
 class MethodChecker:
     CHECKS = [
         'has_one_set_of_brackets',
-        'has_method_definition',
-        'has_formal_arguments',
+        'is_not_new',
     ]
 
     def __init__(self, potential):
         self.potential = potential
+        self._is_method = None
 
     @property
     def is_method(self):
+        if self._is_method is None:
+            self._is_method = self._check()
+
+        return self._is_method
+
+    def __bool__(self):
+        return self.is_method
+
+    @property
+    def method_signature(self):
+        if not self.is_method:
+            return None
+
+        method = re.search(r'\w+\(.*\)', self.potential).group()
+
+        return method
+
+    def _check(self):
         if not self.potential:
             return False
 
@@ -21,56 +39,17 @@ class MethodChecker:
 
         return True
 
-    @property
-    def method_signature(self):
-        method = re.search(r'(\s*\w+\([\w|\s]+[,$|\)])', self.potential).group()
-        if method.endswith(','):
-            method += ' ...)'
-        return method
-
-    def __bool__(self):
-        return self.is_method
-
     def has_one_set_of_brackets(self):
         # one set is not necessary, since they can be a half line
         return self.potential.count('(') == 1
 
-    def has_method_definition(self):
-        potential_method = re.search(r'(\s*\w+)\(', self.potential)
+    def is_not_new(self):
+        match = re.match(r'(\w+)\s\w+\(.*\)', self.potential)
 
-        if not potential_method:
+        if not match:
             return False
 
-        method_definition = potential_method\
-            .group()\
-            .rstrip('(')\
-            .lstrip(' ') # just in case
-
-        try:
-            length_of_match = re.match(r'\w+', method_definition).span()[1]
-        except AttributeError:
+        if match.group(1) == 'new':
             return False
-
-        result = length_of_match == len(method_definition)
-
-        return result
-
-    def has_formal_arguments(self):
-        # include support for half lines
-        argument = re.search(r'\(([\s|\w]+)[,$|\)]', self.potential)
-
-        if not argument:
-            return False
-
-        arguments = [a for a in argument.group().rstrip(')').lstrip('(').split(',') if a]
-        arguments = [tuple([a for a in args.split(' ') if a]) for args in arguments if args]
-
-        for a in arguments:
-            if len(a) == 1:
-                return False
-
-            if '"' in a:
-                return False
 
         return True
-

@@ -2,83 +2,107 @@ import os
 import subprocess
 
 try:
-    from method_checker import MethodChecker
+    from function_checker import FunctionChecker
     from class_checker import ClassChecker
+    from method_checker import MethodChecker
     from repo_executor import RepoExecutor
 except ModuleNotFoundError:
-    from .method_checker import MethodChecker
+    from .function_checker import FunctionChecker
     from .class_checker import ClassChecker
+    from .method_checker import MethodChecker
     from .repo_executor import RepoExecutor
 
-class CodeReader:
-    def __init__(self,
-            lines,
-            method_checker=MethodChecker,
-            class_checker=ClassChecker):
+class LineNotFoundError(Exception): pass;
 
-        self.lines = lines
-        self.method_checker = method_checker
+class Finder:
+    def __init__(self,
+            target_file,
+            function_checker=FunctionChecker,
+            class_checker=ClassChecker,
+            method_checker=MethodChecker,
+            ):
+
+        self.lines = self.indented_lines(target_file)
+        self.function_checker = function_checker
         self.class_checker = class_checker
+        self.method_checker = method_checker
 
     def indentation(self, line):
         return len(line) - len(line.lstrip(' '))
 
-    def indented_lines(self):
+    def indented_lines(self, target_file):
         counted_indentation_lines = []
 
-        for line in self.lines.split("\n"):
+        for line in target_file.split("\n"):
             indentation = self.indentation(line)
+            line = line.lstrip(' ')
             counted_indentation_lines.append((indentation, line))
 
         return counted_indentation_lines
 
-    def method_owner(self, line, source_file_changeline):
-        line = line.lstrip('+-')
-        line_indentation = self.indentation(line)
+    def method_owner(self, change_line):
+        current_indentation = None
 
-        indented_lines = self.indented_lines()
-        # we can use index with ranges to improve performance
-
-        try:
-            line_index = self.lines.split("\n").index(
-                line,
-                source_file_changeline[0],
-                sum(source_file_changeline))
-        except ValueError:
-            # sometimes the file does not exist
-            # this can occur when we get the commit-id wrong
-            # i'm not sure why this is the case
-            return {}
-
-        current_indentation = indented_lines[line_index][0]
-        for line in reversed(indented_lines[:line_index]):
+        for line in self.lines[change_line.line_number::-1]:
+            if current_indentation is None:
+                current_indentation = line[0]
 
             line_indentation = line[0]
             if line_indentation >= current_indentation or not line[1]:
                 continue
 
-            method_checker = self.method_checker(line[1])
             class_checker = self.class_checker(line[1])
 
-            if (not method_checker) and (not class_checker):
+            if not class_checker:
                 current_indentation = line[0]
                 continue
 
-            if method_checker:
-                return method_checker.method_signature
+            # we've found the top level class here
+            methods = self.all_calls_in_method(line)
+            return {class_checker.class_signature: methods}
 
-            if class_checker:
-                return class_checker.class_signature
+    def all_calls_in_method(self, line_with_indentation):
+
+        index = self.lines.index(line_with_indentation)
+        indentation_level = line_with_indentation[0]
+
+        methods = []
+        for line in self.lines[index+1:]:
+            text = line[1]
+
+            if line[0] == 0 and not text:
+                # we've hit on newline
+                continue
+
+            if line[0] <= indentation_level and text:
+                # we've hit on the closing brackets, hopefully
+                break
+
+            if self.class_checker(text):
+                # we're somehow in another class
+                break
+
+            function_checker = self.function_checker(text)
+            method_checker = self.method_checker(text)
+
+            if function_checker:
+                methods.append(function_checker.function_signature)
+                continue
+
+            if method_checker:
+                methods.append(method_checker.method_signature)
+                continue
+
+        return methods
 
 class MethodGetter:
-
     def __init__(self,
             changeline,
             filename,
             commit,
             parent_commit,
             repo_name,
-            code_reader=CodeReader,
+            finder=Finder,
             executor=RepoExecutor):
 
         self._changeline = changeline
@@ -88,72 +112,43 @@ class MethodGetter:
         self.parent_commit = parent_commit
         self.repo_name = repo_name
 
-        self.code_reader = code_reader
         self.executor = executor(self.repo_name)
 
-    def get(self, lines):
-        """
-        We have to first:
-        1. go to the repo
-        2. checkout the base commit
-        3. head the first N lines
-        4. iterating from the bottom line upwards, find the method
-        5. Once the method has been found, we find the block that represents
-        the class
-        6. iterating over every line in the class, return {class_name:
-        [methods_called]}
-        7. return method
-        """
-        topmost_line = lines[0][1]
+        self.commit_file = self.get_file(self.commit)
+        self.parent_file = self.get_file(self.parent_commit)
 
-        operation = topmost_line[0]
-        commit_hash, changeline = self.operator_aware_commit_changeline(operation)
-        lines_with_method = self.get_n_lines(commit_hash, changeline)
+        self.finder = finder
 
-        code_reader = self.code_reader(lines_with_method)
+    def get_class(self, change_line):
+        target_file = self.operation_aware_choose_file(change_line.operation)
 
-        return code_reader.method_owner(topmost_line, changeline)
+        try:
+            owner = self.finder(target_file).method_owner(change_line)
+        except LineNotFoundError:
+            owner = self.finder(self.opposite_file).method_owner(change_line)
+        except LineNotFoundError: # we got nothing
+            owner = None
 
-    def operator_aware_commit_changeline(self, operation):
-        # disclaimer: this appears to work, but it reads counter-intuitive
+        return owner
+
+    def operation_aware_choose_file(self, operation):
         if operation == '-':
-            return self.commit, self.changeline['source_file']
+            self.opposite_file = self.commit_file
+            return self.parent_file
 
         if operation == '+':
-            return self.parent_commit, self.changeline['target_file']
+            self.opposite_file = self.parent_file
+            return self.commit_file
 
-        raise NotImplementedError('This is not a changeline!')
-
-    @property
-    def changeline(self):
-        source_file, target_file = self._changeline\
-                .rstrip(' ')\
-                .lstrip(' ')\
-                .split(' ')
-
-        def to_int(f):
-            return [abs(int(i)) for i in f.split(',')]
-
-        changeline = {
-            'source_file': to_int(source_file),
-            'target_file': to_int(target_file),
-        }
-
-        return changeline
-
-    def get_n_lines(self, commit, changeline):
-        maximum_depth = sum(changeline)
-
-        self.executor.execute(f'git checkout {commit} --quiet')
-        output = self.executor.execute(f'head -n {maximum_depth} {self.filename}')
-
-        # just make sure to clean up
-        self.executor.execute(f'git checkout master --quiet')
-
-        return output
+    def get_file(self, commit):
+        return self.executor.execute_commands([
+            f'git checkout --force {commit} --quiet',
+            f'cat {self.filename}',
+            # f'git checkout --force master --quiet',
+        ]).stdout.decode('utf-8')
 
 if __name__ == '__main__':
-    m = MethodGetter(
+    m = Finder(
             changeline=' -160,6 +160,7 ',
             filename='hbase-http/src/main/java/org/'\
                     'apache/hadoop/hbase/http/jmx/JMXJsonServlet.java',

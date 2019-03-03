@@ -8,12 +8,12 @@ import copy
 # I really don't have time to fix this
 try:
     from method_checker import MethodChecker
-    from method_getter import MethodGetter
     from repo_executor import RepoExecutor
+    from change import Change
 except ModuleNotFoundError:
     from .method_checker import MethodChecker
-    from .method_getter import MethodGetter
     from .repo_executor import RepoExecutor
+    from .change import Change
 
 
 def get_patch(repo_name, commit_hash, parent_commit_hash):
@@ -68,136 +68,12 @@ class PatchSection:
             repo_name=self.repo_name,
             ) for lm in self._lines_modified_with_changes]
 
-
     @property
     def modified_methods(self):
-        return [chunk.changed_methods() for chunk in self.chunks]
+        return [chunk.changed_methods_and_classes() for chunk in self.chunks]
 
     def _split_into_pairs(self, l):
         return [l[i:i+2] for i in range(0, len(l), 2)]
-
-class Change:
-    INVALID_CHANGES = [
-        r'^[</|<].*>', # xml
-        r'^import',
-        r'^package',
-        r'^\*',
-        r'^/\**',
-        r'^@.*', # @overrides are not direct changes to methods,
-        r'^[transient|final]',
-        r'\sclass\s',
-    ]
-
-    METHOD_STARTS = [
-        r'^[private|public]',
-    ]
-
-    def __init__(self,
-            changeline,
-            changes,
-            filename,
-            commit,
-            parent_commit,
-            repo_name,
-            getter=MethodGetter):
-
-        self.changeline = changeline
-        self.changes = [change for change in changes.split('\n') if change]
-        self.filename = filename
-
-        self.commit = commit
-        self.parent_commit = parent_commit
-        self.repo_name = repo_name
-
-        self.getter = getter(
-                changeline=self.changeline,
-                filename=self.filename,
-                commit=commit,
-                parent_commit=parent_commit,
-                repo_name=repo_name)
-
-    @property
-    def has_valid_changes(self):
-        valid_changed_lines = self._valid_changed_lines()
-
-        if not valid_changed_lines:
-            return (False, None)
-
-        return (True, valid_changed_lines)
-
-    def changed_methods(self):
-        valid, changed_lines = self.has_valid_changes
-
-        if not valid:
-            return []
-
-        method_names = []
-
-        for grouped_changes in self.group(changed_lines):
-
-            line = self.__strip_diffmarkers(grouped_changes[0][1])
-            check = MethodChecker(line)
-
-            # print(f'looking at {line} with RESULT {check.is_method}')
-            if not check.is_method:
-                print(f'Need to search source code for {grouped_changes}')
-                method_or_class_name = self.getter.get(grouped_changes)
-
-                if not method_or_class_name: # we tried our best
-                    continue
-
-                method_names.append(method_or_class_name)
-                continue
-
-            method_name = check.method_signature
-
-            if not method_name:
-                continue
-
-            method_names.append(method_name)
-
-        return method_names
-
-    def group(self, linenumbers_with_changes):
-        groups = []
-
-        def relative_change(enumerable):
-            index, change = enumerable
-            value = change[0]
-            return value - index
-
-        for _, gens in itertools.groupby(
-                enumerate(linenumbers_with_changes),
-                relative_change):
-            groups.append(list(map(operator.itemgetter(1), gens)))
-        return groups
-
-    def _valid_changed_lines(self):
-        valid_changed_lines = []
-        for i, line in self._get_changed_lines():
-            if self._invalid_change(line):
-                continue
-
-            valid_changed_lines.append((i, line))
-        return valid_changed_lines
-
-    def _invalid_change(self, line):
-        line = self.__strip_diffmarkers(line)
-
-        if not line:
-            return True
-
-        for regex in self.INVALID_CHANGES:
-            if re.search(regex, line):
-                return True
-
-        return False
-
-    def _get_changed_lines(self):
-        return [(i, line) for i, line in enumerate(self.changes) if line[0] in ['+', '-']]
-
-    def __strip_diffmarkers(self, line):
-        return copy.copy(line)[1:].lstrip(' ')
 
 class PatchSplitter:
     SECTION_SPLITS = 'diff --git'
@@ -225,9 +101,7 @@ class PatchSplitter:
         return disassembled_patch
 
     def all_modified_methods(self, patches):
-        methods = [patch.modified_methods for patch in patches]
-        # double nested
-        return set(itertools.chain(*itertools.chain(*methods)))
+        return [patch.modified_methods for patch in patches]
 
 if __name__ == '__main__':
 

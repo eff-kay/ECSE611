@@ -20,7 +20,7 @@ class RepoExecutor:
             raise NotImplementedError(f'{self.repo_name} must be either "hive" or "hbase"')
 
         if not os.path.isdir(f'./Repo/{self.repo_name}'):
-            subprocess.call(";".join([
+            subprocess.run(";".join([
                 self.SAVE_CURRENT_WORKING_DIRECTORY,
                 f'cd Repo/',
                 self.CLONE_REPO[self.repo_name],
@@ -36,3 +36,11 @@ class RepoExecutor:
             command,
             self.GO_BACK_TO_WORKING_DIRECTORY,
         ]), shell=True).decode('utf-8')
+
+    def execute_commands(self, commands):
+        return subprocess.run(";".join([
+            self.SAVE_CURRENT_WORKING_DIRECTORY,
+            f'cd Repo/{self.repo_name}',
+            *commands,
+            self.GO_BACK_TO_WORKING_DIRECTORY,
+        ]), shell=True, capture_output=True, check=True)
