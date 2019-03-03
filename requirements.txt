@@ -1,1 +1,2 @@
+Dijkstar==2.4.0
 whatthepatch==0.0.5
