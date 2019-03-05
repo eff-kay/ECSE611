@@ -3,7 +3,7 @@ import re
 class MethodChecker:
     CHECKS = [
         'has_one_set_of_brackets',
-        'is_not_new',
+        'is_not_new_or_private_public',
     ]
 
     def __init__(self, potential):
@@ -25,7 +25,7 @@ class MethodChecker:
         if not self.is_method:
             return None
 
-        method = re.search(r'\w+\(.*\)', self.potential).group()
+        method = re.search(r'[\w|\.]+\(.*\)', self.potential).group()
 
         return method
 
@@ -43,13 +43,13 @@ class MethodChecker:
         # one set is not necessary, since they can be a half line
         return self.potential.count('(') == 1
 
-    def is_not_new(self):
-        match = re.match(r'(\w+)\s\w+\(.*\)', self.potential)
+    def is_not_new_or_private_public(self):
+        match = re.match(r'(\w+)\s[\w|\.]+\(.*\)', self.potential)
 
         if not match:
             return False
 
-        if match.group(1) == 'new':
+        if match.group(1) in ['new', 'private', 'public']:
             return False
 
         return True

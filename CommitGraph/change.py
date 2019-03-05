@@ -89,14 +89,15 @@ class Change:
     def changed_methods_and_classes(self):
         valid, changed_lines = self.has_valid_changes
 
-        methods = {'called': {}, 'modified': {}}
+        methods = {}
 
         if not valid:
             return methods
 
         for change_line in changed_lines:
             if change_line.change_type == 'class':
-                methods['modified'].update({ change_line.signature: [] })
+                methods.update({ change_line.signature: [] })
+                continue
 
             if change_line.change_type == 'method':
                 class_signature = self.getter.get_class(change_line)
@@ -105,16 +106,24 @@ class Change:
                     print(f'{change_line} was unable to be found')
                     continue
 
-                klass = [s for s in class_signature.keys()][0]
-
-                if klass not in methods['modified']:
-                    methods['modified'][klass] = [change_line.signature]
-                else:
-                    methods['modified'][klass].append(change_line.signature)
-
-                methods['called'].update(class_signature)
+                methods = self.merge(methods, class_signature)
 
         return methods
+
+    def merge(self, original, class_signature):
+        for klass, methods_calls in class_signature.items():
+            if klass not in original:
+                original[klass] = methods_calls
+                continue
+
+            for methods, calls in methods_calls.items():
+                if methods not in original[klass]:
+                    original[klass][methods] = set(calls)
+                    continue
+
+                original[klass][methods] = original[klass][methods].union(calls)
+
+        return original
 
     def _valid_changed_lines(self):
         valid_changed_lines = []

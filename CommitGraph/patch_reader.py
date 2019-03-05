@@ -70,14 +70,8 @@ class PatchSection:
 
     @property
     def modified_methods(self):
-        all_called_and_modified = [chunk.changed_methods_and_classes() for chunk in self.chunks]
-
-        all = {'called': {}, 'modified': {}}
-        for methods in all_called_and_modified:
-            all['called'].update(methods['called'])
-            all['modified'].update(methods['modified'])
-
-        return all
+        methods = [chunk.changed_methods_and_classes() for chunk in self.chunks]
+        return [methods_ for methods_ in methods if any(methods_)]
 
     def _split_into_pairs(self, l):
         return [l[i:i+2] for i in range(0, len(l), 2)]
@@ -110,12 +104,7 @@ class PatchSplitter:
     def all_modified_methods(self, patches):
         modified_methods = [patch.modified_methods for patch in patches]
 
-        all = {'called': {}, 'modified': {}}
-        for methods in modified_methods:
-            all['called'].update(methods['called'])
-            all['modified'].update(methods['modified'])
-
-        return all
+        return [mm for mm in modified_methods if mm]
 
 if __name__ == '__main__':
 

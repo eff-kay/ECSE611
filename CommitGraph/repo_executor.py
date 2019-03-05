@@ -38,9 +38,12 @@ class RepoExecutor:
         ]), shell=True).decode('utf-8')
 
     def execute_commands(self, commands):
-        return subprocess.run(";".join([
+        command = ";".join([
             self.SAVE_CURRENT_WORKING_DIRECTORY,
             f'cd Repo/{self.repo_name}',
             *commands,
             self.GO_BACK_TO_WORKING_DIRECTORY,
-        ]), shell=True, capture_output=True, check=True)
+        ])
+
+        return subprocess.run(command,
+            shell=True, capture_output=True, check=True)

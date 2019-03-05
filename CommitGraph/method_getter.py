@@ -35,7 +35,7 @@ class Finder:
 
         for line in target_file.split("\n"):
             indentation = self.indentation(line)
-            line = line.lstrip(' ')
+            line = line.lstrip(' ').rstrip(' ')
             counted_indentation_lines.append((indentation, line))
 
         return counted_indentation_lines
@@ -58,23 +58,25 @@ class Finder:
                 continue
 
             # we've found the top level class here
-            methods = self.all_calls_in_method(line)
+            methods = self.all_calls_in_class(line)
             return {class_checker.class_signature: methods}
 
-    def all_calls_in_method(self, line_with_indentation):
+    def all_calls_in_class(self, line_with_indentation):
+        current_function = None
+        current_method = None
 
         index = self.lines.index(line_with_indentation)
-        indentation_level = line_with_indentation[0]
+        class_indentation_level = line_with_indentation[0]
 
-        methods = []
+        methods = {}
         for line in self.lines[index+1:]:
-            text = line[1]
+            indentation, text = line
 
-            if line[0] == 0 and not text:
+            if indentation == 0 and not text:
                 # we've hit on newline
                 continue
 
-            if line[0] <= indentation_level and text:
+            if indentation == class_indentation_level and text:
                 # we've hit on the closing brackets, hopefully
                 break
 
@@ -86,11 +88,15 @@ class Finder:
             method_checker = self.method_checker(text)
 
             if function_checker:
-                methods.append(function_checker.function_signature)
+                signature = function_checker.function_signature
+                methods.update({signature: set()})
+                current_function = signature
                 continue
 
-            if method_checker:
-                methods.append(method_checker.method_signature)
+            if method_checker and current_function is not None:
+                # we're inside a function
+                signature = method_checker.method_signature
+                methods[current_function].add(signature)
                 continue
 
         return methods
