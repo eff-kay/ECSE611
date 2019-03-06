@@ -49,4 +49,5 @@ def fileParse(filepath):
     #             get_files(mapID[defectNum], path)
     # pp.pprint(mapID)
 
-fileParse("log.txt")
+if __name__=="__main__":
+    print(fileParse("log.txt"))
