@@ -119,8 +119,8 @@ class Change:
 
             funcs = {}
             for function, methods in functions.items():
-                func = self.convert_to_labelled_line(function)
                 meths = set([self.convert_to_labelled_line(method) for method in methods])
+                func = self.convert_to_labelled_line(function, any([lmethod.modified for lmethod in meths]))
                 funcs.update({func: meths})
 
             k = self.convert_to_labelled_line(klass)
@@ -128,8 +128,8 @@ class Change:
 
         return labelled
 
-    def convert_to_labelled_line(self, line):
-        return self.LabelledLine(line=line, modified=(line in self.line_only_changed_lines))
+    def convert_to_labelled_line(self, line, is_modified=None):
+        return self.LabelledLine(line=line, modified=is_modified or (line in self.line_only_changed_lines))
 
     def merge(self, original, class_signature):
         for klass, methods_calls in class_signature.items():

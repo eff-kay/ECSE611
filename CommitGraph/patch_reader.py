@@ -119,3 +119,18 @@ class PatchReader:
     def methods(self):
         methods = self.ps.all_modified_methods(self.patches)
         return methods
+
+if __name__ == '__main__':
+
+    patch = get_patch(
+            'hbase',
+            'f0032c925510877396b1b0979abcc2ce83e67529',
+            '482b505796e1dfe33551c1d20af2ff9d1d6a38dc')
+
+    ps = PatchSplitter('hbase',
+            'f0032c925510877396b1b0979abcc2ce83e67529',
+            '482b505796e1dfe33551c1d20af2ff9d1d6a38dc')
+
+    patches = ps.split_by_diff_section(patch)
+    methods = ps.all_modified_methods(patches)
+
