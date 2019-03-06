@@ -91,8 +91,8 @@ def createGraph(methods, hashForNodes):
 			callingMethods[i - 1]= encryptNode(callingMethods[i-1], hashForNodes)
 			callingMethods[i]= encryptNode(callingMethods[i], hashForNodes)
 
-			djikstraGraph.add_edge(callingMethods[i-1], callingMethods[i], {'cost': 0.42})
-			djikstraGraph.add_edge(callingMethods[i], callingMethods[i-1], {'cost': 0.42})
+			djikstraGraph.add_edge(callingMethods[i-1], callingMethods[i], {'cost': EdgeType.DEF.value})
+			djikstraGraph.add_edge(callingMethods[i], callingMethods[i-1], {'cost': EdgeType.DEF.value})
 
 
 		for key,value in calledCalling[0].items() if len(calledCalling[0])>0 else []:
@@ -102,8 +102,8 @@ def createGraph(methods, hashForNodes):
 				key= encryptNode(key, hashForNodes)
 				s= normalizeMethodNames(s)
 				s= encryptNode(s, hashForNodes)
-				djikstraGraph.add_edge(key, s, {'cost': 0.21})
-				djikstraGraph.add_edge(s, key, {'cost': 0.21})
+				djikstraGraph.add_edge(key, s, {'cost': EdgeType.CALLING.value})
+				djikstraGraph.add_edge(s, key, {'cost': EdgeType.CALLED.value})
 
 	return djikstraGraph
 
@@ -173,8 +173,8 @@ def updateGraph(djikstraGraph, methods, currHashForNodes, prevHashForNodes):
 				djikstraGraph.add_edge(currS, prevS, {'cost': 1})
 				djikstraGraph.add_edge(prevS, currS, {'cost': 1})
 
-			djikstraGraph.add_edge(currKey, currS, {'cost': 0.42})
-			djikstraGraph.add_edge(currS, currKey, {'cost': 0.42})
+			djikstraGraph.add_edge(currKey, currS, {'cost': EdgeType.DEF.value})
+			djikstraGraph.add_edge(currS, currKey, {'cost': EdgeType.DEF.value})
 
 
 		for key,value in calledCalling[0].items() if len(calledCalling[0])>0 else []:
@@ -196,8 +196,8 @@ def updateGraph(djikstraGraph, methods, currHashForNodes, prevHashForNodes):
 					djikstraGraph.add_edge(currS, prevS, {'cost': 1})
 					djikstraGraph.add_edge(prevS, currS, {'cost': 1})
 
-				djikstraGraph.add_edge(currKey, currS, {'cost': 0.21})
-				djikstraGraph.add_edge(currS, currKey, {'cost': 0.21})
+				djikstraGraph.add_edge(currKey, currS, {'cost': EdgeType.CALLING.value})
+				djikstraGraph.add_edge(currS, currKey, {'cost': EdgeType.CALLED.value})
 
 	return djikstraGraph
 
@@ -230,6 +230,56 @@ class SetEncoder(json.JSONEncoder):
 		return json.JSONEncoder.default(self, obj)
 
 
+def calculateSx(graph1Nodes, graph2Nodes, hashForGraph1, hashForGraph2, djikstraGraph):
+	v1Costs=[]
+	sx = 0.0
+	for v1 in graph1Nodes:
+		v1 = encryptNode(v1, hashForGraph1)
+		v2Costs=[]
+		for v2 in graph2Nodes:
+			v2 = encryptNode(v2, hashForGraph2)
+			pathInfo= findPath(djikstraGraph, v1, v2)
+			if type(pathInfo)!=str:
+				v2Costs.append(pathInfo.total_cost)
+				# print(pathInfo.total_cost, v1, v2, v2Costs, v1Costs)
+
+		if len(v2Costs) > 0:
+			v1Costs.append(min(v2Costs))
+
+
+	tempSum = 0.0
+	for n in v1Costs:
+		tempSum+= 1/float(n)
+
+	sx=tempSum/float(len(v1Costs))
+	return sx
+
+
+
+
+def calculateSy(graph1Nodes, graph2Nodes, hashForGraph1, hashForGraph2, djikstraGraph):
+	v2Costs = []
+	sy = 0.0
+	numOfUniqueNodes = 0
+	for v2 in graph2Nodes:
+		v2 = encryptNode(v2, hashForGraph2)
+		v1Costs = []
+		for v1 in graph1Nodes:
+			v1 = encryptNode(v1, hashForGraph1)
+			pathInfo = findPath(djikstraGraph, v2, v1)
+			if type(pathInfo) != str:
+				v1Costs.append(pathInfo.total_cost)
+				# print(pathInfo.total_cost, v2, v1, v1Costs, v2Costs)
+
+		if len(v1Costs) > 0:
+			v2Costs.append(min(v1Costs))
+
+	tempSum = 0.0
+	for n in v2Costs:
+		tempSum += 1 / float(n)
+
+	sy = tempSum / float(len(v2Costs))
+	return sy
 
 if __name__=='__main__':
 
@@ -238,13 +288,32 @@ if __name__=='__main__':
 	commitId2 = '4a8d243f4e4bb16bc627eb9de2f6d801250170e9'
 
 	djikstraGraph1 = createGraphFromCommits(project, commitId1, commitId2)
-
-	print(djikstraGraph1._data)
-
 	project = 'hbase'
 	commitId3 = '4a8d243f4e4bb16bc627eb9de2f6d801250170e9'
 	commitId4 = '89af8294f42a9a16b91a09f7808653a71648718f'
 
-	updateGraphForSecondCommit(djikstraGraph1, project, commitId3, commitId4, commitId1, commitId2)
+	djikstraGraph2 = createGraphFromCommits(project, commitId3, commitId4)
+
+	#combining the two graphs
+	#storing graph1 keys for future reference, also every node is a source node because of two way pointers.
+	graph1Nodes = list(djikstraGraph1._data.keys())
+	hashForGraph1 = calculateHashForNodes(commitId1, commitId2)
+	graph2Nodes = list(djikstraGraph2._data.keys())
+	hashForGraph2 = calculateHashForNodes(commitId3, commitId4)
 
 	print(djikstraGraph1._data)
+
+
+	djikstraGraph3= updateGraphForSecondCommit(djikstraGraph1, project, commitId3, commitId4, commitId1, commitId2)
+
+	sx= calculateSx(graph1Nodes, graph2Nodes, hashForGraph1, hashForGraph2, djikstraGraph3)
+
+	sy= calculateSy(graph1Nodes, graph2Nodes, hashForGraph1, hashForGraph2, djikstraGraph3)
+
+	leftMin = float(sx+sy)/2
+	rightMin = sy
+
+	score = max(leftMin, rightMin)
+
+	print(score, leftMin, rightMin)
+
