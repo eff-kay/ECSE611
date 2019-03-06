@@ -37,6 +37,11 @@ class Change:
                 'line_number' # absolute location of the diff line within the file
             ])
 
+    LabelledLine = collections.namedtuple(
+            'LabelledLine',
+            ['line', 'modified']
+    )
+
     def __init__(self,
             changeline,
             changes,
@@ -89,14 +94,14 @@ class Change:
     def changed_methods_and_classes(self):
         valid, changed_lines = self.has_valid_changes
 
-        methods = {}
+        unlabelled = {}
 
         if not valid:
-            return methods
+            return unlabelled
 
         for change_line in changed_lines:
             if change_line.change_type == 'class':
-                methods.update({ change_line.signature: [] })
+                unlabelled.update({ change_line.signature: {} })
                 continue
 
             if change_line.change_type == 'method':
@@ -106,9 +111,25 @@ class Change:
                     print(f'{change_line} was unable to be found')
                     continue
 
-                methods = self.merge(methods, class_signature)
+                unlabelled = self.merge(unlabelled, class_signature)
 
-        return methods
+        labelled = {}
+        self.line_only_changed_lines = [cl.signature for cl in changed_lines]
+        for klass, functions in unlabelled.items():
+
+            funcs = {}
+            for function, methods in functions.items():
+                func = self.convert_to_labelled_line(function)
+                meths = set([self.convert_to_labelled_line(method) for method in methods])
+                funcs.update({func: meths})
+
+            k = self.convert_to_labelled_line(klass)
+            labelled.update({k: funcs})
+
+        return labelled
+
+    def convert_to_labelled_line(self, line):
+        return self.LabelledLine(line=line, modified=(line in self.line_only_changed_lines))
 
     def merge(self, original, class_signature):
         for klass, methods_calls in class_signature.items():
