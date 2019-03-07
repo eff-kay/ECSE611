@@ -4,6 +4,9 @@ from itertools import combinations
 from dijkstar import Graph as dGraph,algorithm
 from patch_reader import PatchReader
 
+from change import Change
+
+LabelledLine = Change.LabelledLine
 import os
 
 class EdgeType(Enum):
@@ -61,9 +64,6 @@ def normalizeMethodNames(name):
 	finalName = leftName+'('+str(finalParamCount)+')'+rightName
 	return finalName
 
-
-
-
 def encryptNode(node, hashForNodes):
 	if node.split("==")[-1]==hashForNodes:
 		return node
@@ -77,12 +77,18 @@ def createGraph(methods, hashForNodes):
 
 	for entry in methods:
 		className = list(entry[0].keys())[0]
+		className= className.line
 
 		calledCalling = list(entry[0].values())
 
 		callingMethods = list(calledCalling[0])
 
 		for i in range(1, len(callingMethods)):
+			if type(callingMethods[i-1])==LabelledLine:
+				callingMethods[i-1]=callingMethods[i-1].line
+
+			if type(callingMethods[i])==LabelledLine:
+				callingMethods[i]= callingMethods[i].line
 
 			callingMethods[i-1]= normalizeMethodNames(callingMethods[i-1])
 			callingMethods[i] = normalizeMethodNames(callingMethods[i])
@@ -98,6 +104,12 @@ def createGraph(methods, hashForNodes):
 		for key,value in calledCalling[0].items() if len(calledCalling[0])>0 else []:
 
 			for s in list(value):
+				if type(key) == LabelledLine:
+					key = key.line
+
+				if type(s) == LabelledLine:
+					s = s.line
+
 				key = normalizeMethodNames(key)
 				key= encryptNode(key, hashForNodes)
 				s= normalizeMethodNames(s)
@@ -124,16 +136,17 @@ def calculateHashForNodes(c1, c2):
 def createGraphFromCommits(project, commitId1, commitId2):
 	patchName = commitId1+commitId2+".patch"
 
-	if patchName not in os.listdir("Patches/"):
-		print('inside test', os.listdir("Patches/"))
-		patchFile = open('Patches/' + patchName, 'w+')
-		methods = PatchReader(project, commitId1, commitId2).methods()
-
-		json.dump(methods, patchFile, cls=SetEncoder)
-	else:
-
-		patchFile = open('Patches/' + patchName)
-		methods = json.loads(patchFile.read())
+	# if patchName not in os.listdir("Patches/"):
+	# print('inside test', os.listdir("Patches/"))
+	# patchFile = open('Patches/' + patchName, 'w+')
+	methods = PatchReader(project, commitId1, commitId2).methods()
+	print(methods)
+		
+	# 	# json.dump(methods, patchFile, cls=SetEncoder)
+	# else:
+	# 	patchFile = open('Patches/' + patchName)
+	# 	methods = json.loads(patchFile.read())
+	# methods = [[{LabelledLine(line='public class HLog', modified=False): {LabelledLine(line=' consolidateOldLog(Path srcDir, Path dstFile, FileSystem fs, Configuration conf)', modified=False): set(), LabelledLine(line=' HLog(FileSystem fs, Path dir, Configuration conf)', modified=False): set(), LabelledLine(line=' computeFilename(long filenum)', modified=False): set(), LabelledLine(line=' obtainSeqNum(int num)', modified=False): {LabelledLine(line='obtainSeqNum()', modified=False)}, LabelledLine(line=' completeCacheFlush(Text regionName, Text tableName, long logSeqId)', modified=False): set()}}, {LabelledLine(line='public class HLog', modified=False): {LabelledLine(line=' consolidateOldLog(Path srcDir, Path dstFile, FileSystem fs, Configuration conf)', modified=False): set(), LabelledLine(line=' HLog(FileSystem fs, Path dir, Configuration conf)', modified=False): set(), LabelledLine(line=' computeFilename(long filenum)', modified=False): set(), LabelledLine(line=' obtainSeqNum(int num)', modified=False): {LabelledLine(line='obtainSeqNum()', modified=False)}, LabelledLine(line=' completeCacheFlush(Text regionName, Text tableName, long logSeqId)', modified=False): set()}}, {LabelledLine(line='public class HLog', modified=False): {LabelledLine(line=' consolidateOldLog(Path srcDir, Path dstFile, FileSystem fs, Configuration conf)', modified=False): set(), LabelledLine(line=' HLog(FileSystem fs, Path dir, Configuration conf)', modified=False): set(), LabelledLine(line=' computeFilename(long filenum)', modified=False): set(), LabelledLine(line=' obtainSeqNum(int num)', modified=False): {LabelledLine(line='obtainSeqNum()', modified=False)}, LabelledLine(line=' completeCacheFlush(Text regionName, Text tableName, long logSeqId)', modified=False): set()}}], [{LabelledLine(line='class HMemcacheScanner', modified=False): {LabelledLine(line=' HMemcacheScanner(long timestamp, Text targetCols[], Text firstRow)', modified=True): set(), LabelledLine(line=' catch(Exception ex)', modified=False): set(), LabelledLine(line=' findFirstRow(int i, Text firstRow)', modified=False): set(), LabelledLine(line=' getNext(int i)', modified=False): set(), LabelledLine(line=' closeSubScanner(int i)', modified=False): set()}}], [{LabelledLine(line='public class HRegion', modified=False): {LabelledLine(line=' closeAndMerge(HRegion srcA, HRegion srcB)', modified=False): set()}}, {LabelledLine(line='public class HRegion', modified=False): {LabelledLine(line=' closeAndMerge(HRegion srcA, HRegion srcB)', modified=False): set()}}, {LabelledLine(line='private class HScanner', modified=False): {LabelledLine(line=' closeScanner(int i)', modified=False): set()}}], [{LabelledLine(line='public class HServerAddress', modified=False): {LabelledLine(line=' HServerAddress(String hostAndPort)', modified=False): set(), LabelledLine(line=' HServerAddress(String bindAddress, int port)', modified=False): set(), LabelledLine(line=' HServerAddress(HServerAddress other)', modified=False): {LabelledLine(line='address.getPort()', modified=False)}, LabelledLine(line=' readFields(DataInput in)', modified=False): set(), LabelledLine(line=' write(DataOutput out)', modified=False): set()}}], [{LabelledLine(line='public class HStore', modified=False): {LabelledLine(line=' HStore(Path dir, Text regionName, Text colFamily, int maxVersions, ...)', modified=False): set(), LabelledLine(line=' flushCache(TreeMap<HStoreKey, BytesWritable> inputCache, ...)', modified=False): {LabelledLine(line='flushCacheHelper(inputCache, logCacheFlushId, true)', modified=False)}, LabelledLine(line=' flushCacheHelper(TreeMap<HStoreKey, BytesWritable> inputCache, ...)', modified=False): {LabelledLine(line='getAllMapFiles()', modified=False)}, LabelledLine(line=' compactHelper(boolean deleteSequenceInfo)', modified=False): {LabelledLine(line='processReadyCompaction()', modified=False)}, LabelledLine(line=' get(HStoreKey key, int numVersions)', modified=False): set(), LabelledLine(line=' getLargestFileSize(Text midKey)', modified=False): set(), LabelledLine(line=' obtainFileLabel(Path prefix)', modified=False): set(), LabelledLine(line=' getScanner(long timestamp, Text targetCols[], ...)', modified=False): set()}}, {LabelledLine(line='public class HStore', modified=False): {LabelledLine(line=' HStore(Path dir, Text regionName, Text colFamily, int maxVersions, ...)', modified=False): set(), LabelledLine(line=' flushCache(TreeMap<HStoreKey, BytesWritable> inputCache, ...)', modified=False): {LabelledLine(line='flushCacheHelper(inputCache, logCacheFlushId, true)', modified=False)}, LabelledLine(line=' flushCacheHelper(TreeMap<HStoreKey, BytesWritable> inputCache, ...)', modified=False): {LabelledLine(line='getAllMapFiles()', modified=False)}, LabelledLine(line=' compactHelper(boolean deleteSequenceInfo)', modified=False): {LabelledLine(line='processReadyCompaction()', modified=False)}, LabelledLine(line=' get(HStoreKey key, int numVersions)', modified=False): set(), LabelledLine(line=' getLargestFileSize(Text midKey)', modified=False): set(), LabelledLine(line=' obtainFileLabel(Path prefix)', modified=False): set(), LabelledLine(line=' getScanner(long timestamp, Text targetCols[], ...)', modified=False): set()}}, {LabelledLine(line='public class HStore', modified=False): {LabelledLine(line=' HStore(Path dir, Text regionName, Text colFamily, int maxVersions, ...)', modified=False): set(), LabelledLine(line=' flushCache(TreeMap<HStoreKey, BytesWritable> inputCache, ...)', modified=False): {LabelledLine(line='flushCacheHelper(inputCache, logCacheFlushId, true)', modified=False)}, LabelledLine(line=' flushCacheHelper(TreeMap<HStoreKey, BytesWritable> inputCache, ...)', modified=False): {LabelledLine(line='getAllMapFiles()', modified=False)}, LabelledLine(line=' compactHelper(boolean deleteSequenceInfo)', modified=False): {LabelledLine(line='processReadyCompaction()', modified=False)}, LabelledLine(line=' get(HStoreKey key, int numVersions)', modified=False): set(), LabelledLine(line=' getLargestFileSize(Text midKey)', modified=False): set(), LabelledLine(line=' obtainFileLabel(Path prefix)', modified=False): set(), LabelledLine(line=' getScanner(long timestamp, Text targetCols[], ...)', modified=False): set()}}, {LabelledLine(line='public class HStore', modified=False): {LabelledLine(line=' HStore(Path dir, Text regionName, Text colFamily, int maxVersions, ...)', modified=False): set(), LabelledLine(line=' flushCache(TreeMap<HStoreKey, BytesWritable> inputCache, ...)', modified=False): {LabelledLine(line='flushCacheHelper(inputCache, logCacheFlushId, true)', modified=False)}, LabelledLine(line=' flushCacheHelper(TreeMap<HStoreKey, BytesWritable> inputCache, ...)', modified=False): {LabelledLine(line='getAllMapFiles()', modified=False)}, LabelledLine(line=' compactHelper(boolean deleteSequenceInfo)', modified=False): {LabelledLine(line='processReadyCompaction()', modified=False)}, LabelledLine(line=' get(HStoreKey key, int numVersions)', modified=False): set(), LabelledLine(line=' getLargestFileSize(Text midKey)', modified=False): set(), LabelledLine(line=' obtainFileLabel(Path prefix)', modified=False): set(), LabelledLine(line=' getScanner(long timestamp, Text targetCols[], ...)', modified=False): set()}}], [{LabelledLine(line='public class HStoreFile', modified=False): {LabelledLine(line=' HStoreFile(Configuration conf)', modified=False): set(), LabelledLine(line=' HStoreFile(Configuration conf, Path dir, Text regionName, ...)', modified=False): set(), LabelledLine(line=' getMapDir(Path dir, Text regionName, Text colFamily)', modified=False): set(), LabelledLine(line=' getInfoDir(Path dir, Text regionName, Text colFamily)', modified=False): set(), LabelledLine(line=' getHStoreDir(Path dir, Text regionName, Text colFamily)', modified=False): set(), LabelledLine(line=' getHRegionDir(Path dir, Text regionName)', modified=False): set(), LabelledLine(line=' obtainNewHStoreFile(Configuration conf, Path dir, ...)', modified=False): set(), LabelledLine(line=' loadHStoreFiles(Configuration conf, Path dir, ...)', modified=False): set(), LabelledLine(line=' splitStoreFile(Text midKey, HStoreFile dstA, HStoreFile dstB, ...)', modified=False): set(), LabelledLine(line=' mergeStoreFiles(Vector<HStoreFile> srcFiles, FileSystem fs, ...)', modified=False): set(), LabelledLine(line=' loadInfo(FileSystem fs)', modified=False): {LabelledLine(line='in.readLong()', modified=False)}, LabelledLine(line=' writeInfo(FileSystem fs, long infonum)', modified=False): set(), LabelledLine(line=' write(DataOutput out)', modified=False): set(), LabelledLine(line=' readFields(DataInput in)', modified=False): set(), LabelledLine(line=' compareTo(Object o)', modified=False): set(), LabelledLine(line=' equals(Object o)', modified=False): {LabelledLine(line='this.compareTo(o)', modified=False)}}}], [{LabelledLine(line='public class HStoreKey', modified=False): {LabelledLine(line=' extractFamily(Text col)', modified=False): set(), LabelledLine(line=' HStoreKey(Text row)', modified=False): set(), LabelledLine(line=' HStoreKey(Text row, long timestamp)', modified=False): set(), LabelledLine(line=' HStoreKey(Text row, Text column)', modified=False): set(), LabelledLine(line=' HStoreKey(Text row, Text column, long timestamp)', modified=False): set(), LabelledLine(line=' setRow(Text newrow)', modified=False): set(), LabelledLine(line=' setColumn(Text newcol)', modified=False): set(), LabelledLine(line=' setVersion(long timestamp)', modified=False): set(), LabelledLine(line=' matchesRowCol(HStoreKey other)', modified=False): set(), LabelledLine(line=' matchesWithoutColumn(HStoreKey other)', modified=False): set(), LabelledLine(line=' compareTo(Object o)', modified=False): set(), LabelledLine(line=' write(DataOutput out)', modified=False): set(), LabelledLine(line=' readFields(DataInput in)', modified=False): set()}}]]
 
 	hashForNodes = calculateHashForNodes(commitId1, commitId2)
 	djikstraGraph = createGraph(methods, hashForNodes)
@@ -151,6 +164,11 @@ def updateGraph(djikstraGraph, methods, currHashForNodes, prevHashForNodes):
 		callingMethods = list(calledCalling[0])
 
 		for i in range(1, len(callingMethods)):
+			if type(callingMethods[i-1])==LabelledLine:
+				callingMethods[i-1]=callingMethods[i-1].line
+
+			if type(callingMethods[i])==LabelledLine:
+				callingMethods[i]= callingMethods[i].line
 
 			callingMethods[i-1]= normalizeMethodNames(callingMethods[i-1])
 			callingMethods[i] = normalizeMethodNames(callingMethods[i])
@@ -180,6 +198,12 @@ def updateGraph(djikstraGraph, methods, currHashForNodes, prevHashForNodes):
 		for key,value in calledCalling[0].items() if len(calledCalling[0])>0 else []:
 
 			for s in list(value):
+				if type(key) == LabelledLine:
+					key = key.line
+
+				if type(s) == LabelledLine:
+					s = s.line
+					
 				key = normalizeMethodNames(key)
 				s = normalizeMethodNames(s)
 				currKey= encryptNode(key, currHashForNodes)
@@ -204,16 +228,16 @@ def updateGraph(djikstraGraph, methods, currHashForNodes, prevHashForNodes):
 def updateGraphForSecondCommit(djikstraGraph, project, currCommitId1, currCommitId2, prevCommitId1, prevCommitId2):
 	patchName = currCommitId1+currCommitId2+".patch"
 
-	if patchName not in os.listdir("Patches/"):
-		print('inside test', os.listdir("Patches/"))
-		patchFile = open('Patches/' + patchName, 'w+')
-		methods = PatchReader(project, currCommitId1, currCommitId2).methods()
+	# if patchName not in os.listdir("Patches/"):
+	# 	print('inside test', os.listdir("Patches/"))
+	# 	patchFile = open('Patches/' + patchName, 'w+')
+	methods = PatchReader(project, currCommitId1, currCommitId2).methods()
 
-		json.dump(methods, patchFile, cls=SetEncoder)
-	else:
-
-		patchFile = open('Patches/' + patchName)
-		methods = json.loads(patchFile.read())
+	# json.dump(methods, patchFile, cls=SetEncoder)
+	# else:
+	# 
+	# 	patchFile = open('Patches/' + patchName)
+	# 	methods = json.loads(patchFile.read())
 
 	currHashForNodes = calculateHashForNodes(currCommitId1, currCommitId2)
 	prevHashForNodes = calculateHashForNodes(prevCommitId1, prevCommitId2)
@@ -295,10 +319,10 @@ def calculateScoresFromCommits(project, commitId1, commitId2, commitId3, commitI
 	graph2Nodes = list(djikstraGraph2._data.keys())
 	hashForGraph2 = calculateHashForNodes(commitId3, commitId4)
 
-	print(djikstraGraph1._data)
-
 
 	djikstraGraph3= updateGraphForSecondCommit(djikstraGraph1, project, commitId3, commitId4, commitId1, commitId2)
+
+	print(djikstraGraph3._data)
 
 	sx= calculateSx(graph1Nodes, graph2Nodes, hashForGraph1, hashForGraph2, djikstraGraph3)
 

@@ -197,3 +197,6 @@ class Change:
 
     def __strip_diffmarkers(self, line):
         return line[0], copy.copy(line)[1:].lstrip(' ')
+
+
+
