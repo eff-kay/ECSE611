@@ -13,7 +13,7 @@ DEBUG = False
 BACKUP = False
 
 
-THRESHOLD = 0.7
+THRESHOLD = 0.6
 
 calling = ((1/float(THRESHOLD))-1)/2
 calling = float("{0:.2f}".format(calling))
@@ -93,52 +93,53 @@ def createGraph(methods, hashForNodes):
 
 	modifiedNodes = set()
 
-	for entry in methods:
-		className = list(entry[0].keys())[0]
-		className= className.line
+	for totalEntry in methods:
+		for entry in totalEntry:
+			className = list(entry.keys())[0]
+			className= className.line
 
-		calledCalling = list(entry[0].values())
+			calledCalling = list(entry.values())
 
-		callingMethods = list(calledCalling[0])
+			callingMethods = list(calledCalling[0])
 
-		for i in range(len(callingMethods)-1):
-			for j in range(i+1,len(callingMethods)):
+			for i in range(len(callingMethods)-1):
+				for j in range(i+1,len(callingMethods)):
 
-				if type(callingMethods[i])==LabelledLine:
-					if callingMethods[i].modified==True:
-						modifiedNodes.add(callingMethods[i].line)
-					callingMethods[i]=callingMethods[i].line
+					if type(callingMethods[i])==LabelledLine:
+						if callingMethods[i].modified==True:
+							modifiedNodes.add(callingMethods[i].line)
+						callingMethods[i]=callingMethods[i].line
 
-				if type(callingMethods[j])==LabelledLine:
-					if callingMethods[j].modified==True:
-						modifiedNodes.add(callingMethods[j].line)
-					callingMethods[j]= callingMethods[j].line
+					if type(callingMethods[j])==LabelledLine:
+						if callingMethods[j].modified==True:
+							modifiedNodes.add(callingMethods[j].line)
+						callingMethods[j]= callingMethods[j].line
 
-				#encrypt the methods
-				callingMethods[i]= encryptNode(callingMethods[i], hashForNodes)
-				callingMethods[j]= encryptNode(callingMethods[j], hashForNodes)
+					#encrypt the methods
+					callingMethods[i]= encryptNode(callingMethods[i], hashForNodes)
+					callingMethods[j]= encryptNode(callingMethods[j], hashForNodes)
 
-				djikstraGraph.add_edge(callingMethods[i], callingMethods[j], {'cost': EdgeType.DEF.value})
-				djikstraGraph.add_edge(callingMethods[j], callingMethods[i], {'cost': EdgeType.DEF.value})
+					djikstraGraph.add_edge(callingMethods[i], callingMethods[j], {'cost': EdgeType.DEF.value})
+					djikstraGraph.add_edge(callingMethods[j], callingMethods[i], {'cost': EdgeType.DEF.value})
 
 
-		for key,value in calledCalling[0].items() if len(calledCalling[0])>0 else []:
+			for key,value in calledCalling[0].items() if len(calledCalling[0])>0 else []:
 
-			for s in list(value):
-				if type(key) == LabelledLine:
-					if key.modified == True:
-						modifiedNodes.add(key.line)
-					key = key.line
+				for s in list(value):
+					if type(key) == LabelledLine:
+						if key.modified == True:
+							modifiedNodes.add(key.line)
+						key = key.line
 
-				if type(s) == LabelledLine:
-					if s.modified == True:
-						modifiedNodes.add(s.line)
-					s = s.line
+					if type(s) == LabelledLine:
+						if s.modified == True:
+							modifiedNodes.add(s.line)
+						s = s.line
 
-				key= encryptNode(key, hashForNodes)
-				s= encryptNode(s, hashForNodes)
-				djikstraGraph.add_edge(key, s, {'cost': EdgeType.CALLING.value})
-				djikstraGraph.add_edge(s, key, {'cost': EdgeType.CALLED.value})
+					key= encryptNode(key, hashForNodes)
+					s= encryptNode(s, hashForNodes)
+					djikstraGraph.add_edge(key, s, {'cost': EdgeType.CALLING.value})
+					djikstraGraph.add_edge(s, key, {'cost': EdgeType.CALLED.value})
 
 	return djikstraGraph, modifiedNodes
 
@@ -179,57 +180,31 @@ def createGraphFromCommits(project, commitId1, commitId2):
 
 def updateGraph(djikstraGraph, methods, currHashForNodes, prevHashForNodes):
 
-	for entry in methods:
-		className = list(entry[0].keys())[0]
+	for totalEntry in methods:
+		for entry in totalEntry:
+			className = list(entry.keys())[0]
 
-		calledCalling = list(entry[0].values())
+			calledCalling = list(entry.values())
 
-		callingMethods = list(calledCalling[0])
-
-
-		for i in range(len(callingMethods)-1):
-			for j in range(i+1,len(callingMethods)):
-				if type(callingMethods[i])==LabelledLine:
-					callingMethods[i]=callingMethods[i].line
+			callingMethods = list(calledCalling[0])
 
 
-				if type(callingMethods[j])==LabelledLine:
-					callingMethods[j]= callingMethods[j].line
-
-				#encrypt the methods
-
-				currKey = encryptNode(callingMethods[i], currHashForNodes)
-				currS= encryptNode(callingMethods[j], currHashForNodes)
-
-				prevKey = encryptNode(callingMethods[i], prevHashForNodes)
-				prevS = encryptNode(callingMethods[j], prevHashForNodes)
-
-				if prevKey in djikstraGraph:
-					djikstraGraph.add_edge(currKey, prevKey, {'cost': 1})
-					djikstraGraph.add_edge(prevKey, currKey, {'cost': 1})
-
-				if prevS in djikstraGraph:
-					djikstraGraph.add_edge(currS, prevS, {'cost': 1})
-					djikstraGraph.add_edge(prevS, currS, {'cost': 1})
-
-				djikstraGraph.add_edge(currKey, currS, {'cost': EdgeType.DEF.value})
-				djikstraGraph.add_edge(currS, currKey, {'cost': EdgeType.DEF.value})
+			for i in range(len(callingMethods)-1):
+				for j in range(i+1,len(callingMethods)):
+					if type(callingMethods[i])==LabelledLine:
+						callingMethods[i]=callingMethods[i].line
 
 
-			for key,value in calledCalling[0].items() if len(calledCalling[0])>0 else []:
+					if type(callingMethods[j])==LabelledLine:
+						callingMethods[j]= callingMethods[j].line
 
-				for s in list(value):
-					if type(key) == LabelledLine:
-						key = key.line
+					#encrypt the methods
 
-					if type(s) == LabelledLine:
-						s = s.line
+					currKey = encryptNode(callingMethods[i], currHashForNodes)
+					currS= encryptNode(callingMethods[j], currHashForNodes)
 
-					currKey= encryptNode(key, currHashForNodes)
-					currS= encryptNode(s, currHashForNodes)
-
-					prevKey = encryptNode(key, prevHashForNodes)
-					prevS = encryptNode(s, prevHashForNodes)
+					prevKey = encryptNode(callingMethods[i], prevHashForNodes)
+					prevS = encryptNode(callingMethods[j], prevHashForNodes)
 
 					if prevKey in djikstraGraph:
 						djikstraGraph.add_edge(currKey, prevKey, {'cost': 1})
@@ -239,10 +214,37 @@ def updateGraph(djikstraGraph, methods, currHashForNodes, prevHashForNodes):
 						djikstraGraph.add_edge(currS, prevS, {'cost': 1})
 						djikstraGraph.add_edge(prevS, currS, {'cost': 1})
 
-					djikstraGraph.add_edge(currKey, currS, {'cost': EdgeType.CALLING.value})
-					djikstraGraph.add_edge(currS, currKey, {'cost': EdgeType.CALLED.value})
+					djikstraGraph.add_edge(currKey, currS, {'cost': EdgeType.DEF.value})
+					djikstraGraph.add_edge(currS, currKey, {'cost': EdgeType.DEF.value})
 
-		return djikstraGraph
+
+				for key,value in calledCalling[0].items() if len(calledCalling[0])>0 else []:
+
+					for s in list(value):
+						if type(key) == LabelledLine:
+							key = key.line
+
+						if type(s) == LabelledLine:
+							s = s.line
+
+						currKey= encryptNode(key, currHashForNodes)
+						currS= encryptNode(s, currHashForNodes)
+
+						prevKey = encryptNode(key, prevHashForNodes)
+						prevS = encryptNode(s, prevHashForNodes)
+
+						if prevKey in djikstraGraph:
+							djikstraGraph.add_edge(currKey, prevKey, {'cost': 1})
+							djikstraGraph.add_edge(prevKey, currKey, {'cost': 1})
+
+						if prevS in djikstraGraph:
+							djikstraGraph.add_edge(currS, prevS, {'cost': 1})
+							djikstraGraph.add_edge(prevS, currS, {'cost': 1})
+
+						djikstraGraph.add_edge(currKey, currS, {'cost': EdgeType.CALLING.value})
+						djikstraGraph.add_edge(currS, currKey, {'cost': EdgeType.CALLED.value})
+
+	return djikstraGraph
 
 def updateGraphForSecondCommit(djikstraGraph, project, currCommitId1, currCommitId2, prevCommitId1, prevCommitId2):
 
@@ -287,7 +289,7 @@ def calculateSx(graph1Nodes, graph2Nodes, hashForGraph1, hashForGraph2, djikstra
 	for n in v1Costs:
 		tempSum+= 1/float(n)
 
-	sx=tempSum/float(len(graph1Nodes))
+	sx=tempSum/float(len(graph1Nodes)) if len(graph1Nodes)>0 else tempSum
 	return sx
 
 
@@ -314,7 +316,7 @@ def calculateSy(graph1Nodes, graph2Nodes, hashForGraph1, hashForGraph2, djikstra
 	for n in v2Costs:
 		tempSum += 1 / float(n)
 
-	sy = tempSum / float(len(graph2Nodes))
+	sy = tempSum / float(len(graph2Nodes)) if len(graph2Nodes)>0 else tempSum
 	return sy
 
 
@@ -362,13 +364,30 @@ if __name__=='__main__':
 	project = 'hbase'
 	commitId1 = '114d67c614847da0eb08bc2b27cde120bda2b3ff'
 	commitId2 = '4a8d243f4e4bb16bc627eb9de2f6d801250170e9'
-
+	#
 	project = 'hbase'
 	commitId3 = '4a8d243f4e4bb16bc627eb9de2f6d801250170e9'
 	commitId4 = '89af8294f42a9a16b91a09f7808653a71648718f'
 
 
-	DEBUG=True
+	# project = 'hbase'
+	commitId1 = '7c3d11974bf7c2b4beb1a385cbab68d8175731b3'
+	commitId2 = '66839c4c17b169f5f2b6f39374558d9a5c3bc2e2'
+
+	# project = 'hbase'
+	# commitId3 = '66839c4c17b169f5f2b6f39374558d9a5c3bc2e2'
+	# commitId4 = 'a2fba1024dc32de7fd21513540f064433e7795b0'
+
+	# 'HADOOP-1391.': [('7c3d11974bf7c2b4beb1a385cbab68d8175731b3',
+	# 				  '66839c4c17b169f5f2b6f39374558d9a5c3bc2e2'),
+	# 				 ('66839c4c17b169f5f2b6f39374558d9a5c3bc2e2',
+	# 				  'a2fba1024dc32de7fd21513540f064433e7795b0'),
+
+	# commitId3 = '87f5d5dffd96e09d789a9063f8f6d98a75fb24dd'
+	# commitId4 = '6f42c1f60f8571c0d6fdb6e54be3fe2b6df0711c'
+
+
+	# DEBUG=False
 	# BACKUP = True
 
 

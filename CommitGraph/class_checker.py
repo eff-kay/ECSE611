@@ -31,7 +31,12 @@ class ClassChecker:
         if not self.is_class:
             return None
 
-        return re.search(r'.*class\s([A-Z]\w+)', self.potential).group()
+        match = re.search(r'.*class\s([A-Z]\w+)', self.potential)
+
+        if match is not None:
+            return match.group()
+        else:
+            return None
 
     def __bool__(self):
         return self.is_class
