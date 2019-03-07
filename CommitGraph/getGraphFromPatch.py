@@ -202,7 +202,7 @@ def updateGraph(djikstraGraph, methods, currHashForNodes, prevHashForNodes):
 	return djikstraGraph
 
 def updateGraphForSecondCommit(djikstraGraph, project, currCommitId1, currCommitId2, prevCommitId1, prevCommitId2):
-	patchName = commitId1+commitId2+".patch"
+	patchName = currCommitId1+currCommitId2+".patch"
 
 	if patchName not in os.listdir("Patches/"):
 		print('inside test', os.listdir("Patches/"))
@@ -281,17 +281,11 @@ def calculateSy(graph1Nodes, graph2Nodes, hashForGraph1, hashForGraph2, djikstra
 	sy = tempSum / float(len(v2Costs))
 	return sy
 
-if __name__=='__main__':
 
-	project = 'hbase'
-	commitId1 = '114d67c614847da0eb08bc2b27cde120bda2b3ff'
-	commitId2 = '4a8d243f4e4bb16bc627eb9de2f6d801250170e9'
+
+def calculateScoresFromCommits(project, commitId1, commitId2, commitId3, commitId4):
 
 	djikstraGraph1 = createGraphFromCommits(project, commitId1, commitId2)
-	project = 'hbase'
-	commitId3 = '4a8d243f4e4bb16bc627eb9de2f6d801250170e9'
-	commitId4 = '89af8294f42a9a16b91a09f7808653a71648718f'
-
 	djikstraGraph2 = createGraphFromCommits(project, commitId3, commitId4)
 
 	#combining the two graphs
@@ -315,5 +309,19 @@ if __name__=='__main__':
 
 	score = max(leftMin, rightMin)
 
-	print(score, leftMin, rightMin)
+	print(leftMin, rightMin, score)
+
+	return score
+
+if __name__=='__main__':
+	project = 'hbase'
+	commitId1 = '114d67c614847da0eb08bc2b27cde120bda2b3ff'
+	commitId2 = '4a8d243f4e4bb16bc627eb9de2f6d801250170e9'
+
+	project = 'hbase'
+	commitId3 = '4a8d243f4e4bb16bc627eb9de2f6d801250170e9'
+	commitId4 = '89af8294f42a9a16b91a09f7808653a71648718f'
+
+
+	print(calculateScoresFromCommits(project, commitId1, commitId2, commitId3, commitId4))
 
