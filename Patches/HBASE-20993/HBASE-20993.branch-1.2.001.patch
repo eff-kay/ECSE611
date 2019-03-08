@@ -1,0 +1,43 @@
+From c7ce250a5d4a4dbdac72ecf1d5d5a176f71670ad Mon Sep 17 00:00:00 2001
+From: Jack Bearden <jack@jackbearden.com>
+Date: Tue, 7 Aug 2018 18:15:55 -0700
+Subject: [PATCH] HBASE-20993. [Auth] IPC client fallback to simple auth
+
+---
+ .../src/main/java/org/apache/hadoop/hbase/ipc/RpcClientImpl.java    | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/ipc/RpcClientImpl.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/ipc/RpcClientImpl.java
+index 647e917e10..307736bcba 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/ipc/RpcClientImpl.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/ipc/RpcClientImpl.java
+@@ -345,6 +345,10 @@ public class RpcClientImpl extends AbstractRpcClient {
+         authMethod = AuthMethod.SIMPLE;
+       } else if (token != null) {
+         authMethod = AuthMethod.DIGEST;
++      } else if (serverPrincipal == null &&
++                 conf.get("hbase.ipc.client.fallback-to-simple-auth-allowed").equals("true")) {
++        authMethod = AuthMethod.SIMPLE;
++        useSasl = false;
+       } else {
+         authMethod = AuthMethod.KERBEROS;
+       }
+@@ -712,7 +716,6 @@ public class RpcClientImpl extends AbstractRpcClient {
+         close();
+         throw e;
+       }
+-
+       try {
+         if (LOG.isDebugEnabled()) {
+           LOG.debug("Connecting to " + server);
+@@ -727,6 +730,7 @@ public class RpcClientImpl extends AbstractRpcClient {
+           OutputStream outStream = NetUtils.getOutputStream(socket, writeTO);
+           // Write out the preamble -- MAGIC, version, and auth to use.
+           writeConnectionHeaderPreamble(outStream);
++
+           if (useSasl) {
+             final InputStream in2 = inStream;
+             final OutputStream out2 = outStream;
+-- 
+2.14.3 (Apple Git-98)
+

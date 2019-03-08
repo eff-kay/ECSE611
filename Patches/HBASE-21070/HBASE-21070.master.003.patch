@@ -1,0 +1,301 @@
+From f92e3369bbf602620cc830a7bb5f57d36fe5bfa6 Mon Sep 17 00:00:00 2001
+From: Zach York <zyork@amazon.com>
+Date: Wed, 2 May 2018 11:16:02 -0700
+Subject: [PATCH] HBASE-21070 Fix SnapshotFileCache for HBase backed by S3
+
+SnapshotFileCache depends on getting the last modified time of the
+snapshot directory, however, S3 FileSystem's do not update the
+last modified time of the top 'folder' when objects are added/removed.
+---
+ .../hbase/master/snapshot/SnapshotFileCache.java   | 84 ++++++++++++----------
+ .../master/snapshot/TestSnapshotFileCache.java     | 64 +++++++++++------
+ 2 files changed, 89 insertions(+), 59 deletions(-)
+
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/snapshot/SnapshotFileCache.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/snapshot/SnapshotFileCache.java
+index 1524ecd..554f39b 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/snapshot/SnapshotFileCache.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/snapshot/SnapshotFileCache.java
+@@ -17,7 +17,6 @@
+  */
+ package org.apache.hadoop.hbase.master.snapshot;
+ 
+-import java.io.FileNotFoundException;
+ import java.io.IOException;
+ import java.util.Collection;
+ import java.util.HashMap;
+@@ -89,12 +88,13 @@ public class SnapshotFileCache implements Stoppable {
+   private final FileSystem fs;
+   private final SnapshotFileInspector fileInspector;
+   private final Path snapshotDir;
+-  private final Set<String> cache = new HashSet<>();
++  private volatile Set<String> cache = new HashSet<String>();
+   /**
+    * This is a helper map of information about the snapshot directories so we don't need to rescan
+    * them if they haven't changed since the last time we looked.
+    */
+-  private final Map<String, SnapshotDirectoryInfo> snapshots = new HashMap<>();
++  private volatile Map<String, SnapshotDirectoryInfo> snapshots =
++      new HashMap<String, SnapshotDirectoryInfo>();
+   private final Timer refreshTimer;
+ 
+   private long lastModifiedTime = Long.MIN_VALUE;
+@@ -214,49 +214,55 @@ public class SnapshotFileCache implements Stoppable {
+ 
+   private synchronized void refreshCache() throws IOException {
+     // get the status of the snapshots directory and check if it is has changes
+-    FileStatus dirStatus;
+-    try {
+-      dirStatus = fs.getFileStatus(snapshotDir);
+-    } catch (FileNotFoundException e) {
+-      if (this.cache.size() > 0) {
+-        LOG.error("Snapshot directory: " + snapshotDir + " doesn't exist");
++    // We need to check the internal folder as Object Stores do not always update
++    // the parent directory's modification time.
++    FileStatus[] snapshotsOnDisk = FSUtils.listStatus(fs, snapshotDir);
++    if (snapshotsOnDisk == null) {
++      // remove all the remembered snapshots because we don't have any left
++      if (LOG.isDebugEnabled() && this.snapshots.size() > 0) {
++        LOG.debug("No snapshots on-disk under: {}, cache empty", snapshotDir);
+       }
++      this.snapshots.clear();
++      this.cache.clear();
+       return;
+     }
+ 
++    int containsTmpDir = 0;
++    long subDirLastModifiedTime = Long.MIN_VALUE;
++    for (FileStatus fileStatus : snapshotsOnDisk) {
++      if (fileStatus.getPath().getName().equals(SnapshotDescriptionUtils.SNAPSHOT_TMP_DIR_NAME)) {
++        containsTmpDir = 1;
++      } else if (fileStatus.getModificationTime() > subDirLastModifiedTime) {
++        subDirLastModifiedTime = fileStatus.getModificationTime();
++      }
++    }
++
+     // if the snapshot directory wasn't modified since we last check, we are done
+-    if (dirStatus.getModificationTime() <= this.lastModifiedTime) return;
++    if (subDirLastModifiedTime <= this.lastModifiedTime &&
++        snapshotsOnDisk.length - containsTmpDir == this.snapshots.size()) {
++      LOG.debug("Snapshot directory has not been modified since the last refresh, " +
++          "skipping cache refresh");
++      return;
++    }
+ 
+     // directory was modified, so we need to reload our cache
+     // there could be a slight race here where we miss the cache, check the directory modification
+     // time, then someone updates the directory, causing us to not scan the directory again.
+     // However, snapshot directories are only created once, so this isn't an issue.
++    LOG.debug("Snapshot Directory: {} has changed since last run, refreshing SnapshotFileCache.",
++        snapshotDir);
+ 
+-    // 1. update the modified time
+-    this.lastModifiedTime = dirStatus.getModificationTime();
+-
+-    // 2.clear the cache
+-    this.cache.clear();
+-    Map<String, SnapshotDirectoryInfo> known = new HashMap<>();
++    // 1. Create a temp cache
++    final Set<String> tempCache = new HashSet<String>();
++    Map<String, SnapshotDirectoryInfo> known = new HashMap<String, SnapshotDirectoryInfo>();
+ 
+-    // 3. check each of the snapshot directories
+-    FileStatus[] snapshots = FSUtils.listStatus(fs, snapshotDir);
+-    if (snapshots == null) {
+-      // remove all the remembered snapshots because we don't have any left
+-      if (LOG.isDebugEnabled() && this.snapshots.size() > 0) {
+-        LOG.debug("No snapshots on-disk, cache empty");
+-      }
+-      this.snapshots.clear();
+-      return;
+-    }
+-
+-    // 3.1 iterate through the on-disk snapshots
+-    for (FileStatus snapshot : snapshots) {
++    // 2. iterate through the on-disk snapshots
++    for (FileStatus snapshot : snapshotsOnDisk) {
+       String name = snapshot.getPath().getName();
+-      // its not the tmp dir,
++      // its not the tmp dir
+       if (!name.equals(SnapshotDescriptionUtils.SNAPSHOT_TMP_DIR_NAME)) {
+         SnapshotDirectoryInfo files = this.snapshots.remove(name);
+-        // 3.1.1 if we don't know about the snapshot or its been modified, we need to update the
++        // 2.1 if we don't know about the snapshot or its been modified, we need to update the
+         // files the latter could occur where I create a snapshot, then delete it, and then make a
+         // new snapshot with the same name. We will need to update the cache the information from
+         // that new snapshot, even though it has the same name as the files referenced have
+@@ -266,15 +272,17 @@ public class SnapshotFileCache implements Stoppable {
+           Collection<String> storedFiles = fileInspector.filesUnderSnapshot(snapshot.getPath());
+           files = new SnapshotDirectoryInfo(snapshot.getModificationTime(), storedFiles);
+         }
+-        // 3.2 add all the files to cache
+-        this.cache.addAll(files.getFiles());
++        // 2.2 add all the files to cache
++        tempCache.addAll(files.getFiles());
+         known.put(name, files);
+       }
+     }
+ 
+-    // 4. set the snapshots we are tracking
+-    this.snapshots.clear();
+-    this.snapshots.putAll(known);
++    this.lastModifiedTime = subDirLastModifiedTime;
++
++    // 3. Update the cache and snapshot objects
++    this.cache = tempCache;
++    this.snapshots = known;
+   }
+ 
+   /**
+@@ -305,6 +313,10 @@ public class SnapshotFileCache implements Stoppable {
+     return this.stop;
+   }
+ 
++  protected long getLastModifiedTime() {
++    return lastModifiedTime;
++  }
++
+   /**
+    * Information about a snapshot directory
+    */
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/master/snapshot/TestSnapshotFileCache.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/master/snapshot/TestSnapshotFileCache.java
+index 7ef5477..60104da 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/master/snapshot/TestSnapshotFileCache.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/master/snapshot/TestSnapshotFileCache.java
+@@ -58,14 +58,18 @@ public class TestSnapshotFileCache {
+ 
+   private static final Logger LOG = LoggerFactory.getLogger(TestSnapshotFileCache.class);
+   private static final HBaseTestingUtility UTIL = new HBaseTestingUtility();
++  // don't refresh the cache unless we tell it to
++  private static final long PERIOD = Long.MAX_VALUE;
+   private static FileSystem fs;
+   private static Path rootDir;
++  private static Path snapshotDir;
+ 
+   @BeforeClass
+   public static void startCluster() throws Exception {
+     UTIL.startMiniDFSCluster(1);
+     fs = UTIL.getDFSCluster().getFileSystem();
+     rootDir = UTIL.getDefaultRootDirPath();
++    snapshotDir = SnapshotDescriptionUtils.getSnapshotsDir(rootDir);
+   }
+ 
+   @AfterClass
+@@ -76,48 +80,57 @@ public class TestSnapshotFileCache {
+   @After
+   public void cleanupFiles() throws Exception {
+     // cleanup the snapshot directory
+-    Path snapshotDir = SnapshotDescriptionUtils.getSnapshotsDir(rootDir);
+     fs.delete(snapshotDir, true);
+   }
+ 
+   @Test
+   public void testLoadAndDelete() throws IOException {
+-    // don't refresh the cache unless we tell it to
+-    long period = Long.MAX_VALUE;
+-    SnapshotFileCache cache = new SnapshotFileCache(fs, rootDir, period, 10000000,
++    SnapshotFileCache cache = new SnapshotFileCache(fs, rootDir, PERIOD, 10000000,
+         "test-snapshot-file-cache-refresh", new SnapshotFiles());
+ 
+-    createAndTestSnapshotV1(cache, "snapshot1a", false, true);
++    createAndTestSnapshotV1(cache, "snapshot1a", false, true, false);
+ 
+-    createAndTestSnapshotV2(cache, "snapshot2a", false, true);
++    createAndTestSnapshotV2(cache, "snapshot2a", false, true, false);
+   }
+ 
+   @Test
+   public void testReloadModifiedDirectory() throws IOException {
+-    // don't refresh the cache unless we tell it to
+-    long period = Long.MAX_VALUE;
+-    SnapshotFileCache cache = new SnapshotFileCache(fs, rootDir, period, 10000000,
++    SnapshotFileCache cache = new SnapshotFileCache(fs, rootDir, PERIOD, 10000000,
+         "test-snapshot-file-cache-refresh", new SnapshotFiles());
+ 
+-    createAndTestSnapshotV1(cache, "snapshot1", false, true);
++    createAndTestSnapshotV1(cache, "snapshot1", false, true, false);
+     // now delete the snapshot and add a file with a different name
+-    createAndTestSnapshotV1(cache, "snapshot1", false, false);
++    createAndTestSnapshotV1(cache, "snapshot1", false, false, false);
+ 
+-    createAndTestSnapshotV2(cache, "snapshot2", false, true);
++    createAndTestSnapshotV2(cache, "snapshot2", false, true, false);
+     // now delete the snapshot and add a file with a different name
+-    createAndTestSnapshotV2(cache, "snapshot2", false, false);
++    createAndTestSnapshotV2(cache, "snapshot2", false, false, false);
+   }
+ 
+   @Test
+   public void testSnapshotTempDirReload() throws IOException {
+-    long period = Long.MAX_VALUE;
+-    // This doesn't refresh cache until we invoke it explicitly
+-    SnapshotFileCache cache = new SnapshotFileCache(fs, rootDir, period, 10000000,
++    SnapshotFileCache cache =
++        new SnapshotFileCache(fs, rootDir, PERIOD, 10000000, "test-snapshot-file-cache-refresh", new SnapshotFiles());
++
++    // Add a new non-tmp snapshot
++    createAndTestSnapshotV1(cache, "snapshot0v1", false, false, false);
++    createAndTestSnapshotV1(cache, "snapshot0v2", false, false, false);
++  }
++
++  @Test
++  public void testCacheUpdatedWhenLastModifiedOfSnapDirNotUpdated() throws IOException {
++    SnapshotFileCache cache = new SnapshotFileCache(fs, rootDir, PERIOD, 10000000,
+         "test-snapshot-file-cache-refresh", new SnapshotFiles());
+ 
+     // Add a new non-tmp snapshot
+-    createAndTestSnapshotV1(cache, "snapshot0v1", false, false);
+-    createAndTestSnapshotV1(cache, "snapshot0v2", false, false);
++    createAndTestSnapshotV1(cache, "snapshot1v1", false, false, true);
++    createAndTestSnapshotV1(cache, "snapshot1v2", false, false, true);
++
++    // Add a new tmp snapshot
++    createAndTestSnapshotV2(cache, "snapshot2v1", true, false, true);
++
++    // Add another tmp snapshot
++    createAndTestSnapshotV2(cache, "snapshot2v2", true, false, true);
+   }
+ 
+   class SnapshotFiles implements SnapshotFileCache.SnapshotFileInspector {
+@@ -130,23 +143,24 @@ public class TestSnapshotFileCache {
+   }
+ 
+   private SnapshotMock.SnapshotBuilder createAndTestSnapshotV1(final SnapshotFileCache cache,
+-      final String name, final boolean tmp, final boolean removeOnExit) throws IOException {
++      final String name, final boolean tmp, final boolean removeOnExit, boolean setFolderTime)
++      throws IOException {
+     SnapshotMock snapshotMock = new SnapshotMock(UTIL.getConfiguration(), fs, rootDir);
+     SnapshotMock.SnapshotBuilder builder = snapshotMock.createSnapshotV1(name, name);
+-    createAndTestSnapshot(cache, builder, tmp, removeOnExit);
++    createAndTestSnapshot(cache, builder, tmp, removeOnExit, setFolderTime);
+     return builder;
+   }
+ 
+   private void createAndTestSnapshotV2(final SnapshotFileCache cache, final String name,
+-      final boolean tmp, final boolean removeOnExit) throws IOException {
++      final boolean tmp, final boolean removeOnExit, boolean setFolderTime) throws IOException {
+     SnapshotMock snapshotMock = new SnapshotMock(UTIL.getConfiguration(), fs, rootDir);
+     SnapshotMock.SnapshotBuilder builder = snapshotMock.createSnapshotV2(name, name);
+-    createAndTestSnapshot(cache, builder, tmp, removeOnExit);
++    createAndTestSnapshot(cache, builder, tmp, removeOnExit, setFolderTime);
+   }
+ 
+   private void createAndTestSnapshot(final SnapshotFileCache cache,
+       final SnapshotMock.SnapshotBuilder builder,
+-      final boolean tmp, final boolean removeOnExit) throws IOException {
++      final boolean tmp, final boolean removeOnExit, boolean setFolderTime) throws IOException {
+     List<Path> files = new ArrayList<>();
+     for (int i = 0; i < 3; ++i) {
+       for (Path filePath: builder.addRegion()) {
+@@ -157,6 +171,10 @@ public class TestSnapshotFileCache {
+     // Finalize the snapshot
+     builder.commit();
+ 
++    if (setFolderTime) {
++      fs.setTimes(snapshotDir, cache.getLastModifiedTime(), -1);
++    }
++
+     // Make sure that all files are still present
+     for (Path path: files) {
+       assertFalse("Cache didn't find " + path, contains(getNonSnapshotFiles(cache, path), path));
+-- 
+2.6.4

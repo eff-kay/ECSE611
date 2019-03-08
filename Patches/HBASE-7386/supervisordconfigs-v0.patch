@@ -1,0 +1,49 @@
+diff --git conf/supervisord/README conf/supervisord/README
+new file mode 100644
+index 0000000..ffae4da
+--- /dev/null
++++ conf/supervisord/README
+@@ -0,0 +1,5 @@
++This directory contains supervisord config files that can be used to automatically restart
++an hbase process in the case of unexpected failure.  To include these in an supervisord
++configuration, add the following to a config:
++[include]
++files=/path/to/directory/*.supervisord.conf
+diff --git conf/supervisord/hbase-master.supervisord.conf conf/supervisord/hbase-master.supervisord.conf
+new file mode 100644
+index 0000000..c367a3f
+--- /dev/null
++++ conf/supervisord/hbase-master.supervisord.conf
+@@ -0,0 +1,12 @@
++[program:hbase-MASTER]
++command=%(ENV_HBASE_HOME)s/bin/hbase "master" "supervise"
++#command=/home/gchanan/workspace/apachetrunk2/bin/hbase "master" "supervise"
++autostart=true
++stdout_logfile=%(ENV_HBASE_LOG_DIR)s/hbase-master.out
++stderr_logfile=%(ENV_HBASE_LOG_DIR)s/hbase-master.err
++environment=HBASE_ZNODE_FILE='/tmp/hbase-master-start.znode'
++exitcodes=0,2
++autorestart=true
++startsecs=20
++stopwaitsecs=30
++killasgroup=true
+diff --git conf/supervisord/supervisord.conf conf/supervisord/supervisord.conf
+new file mode 100644
+index 0000000..ef8bf09
+--- /dev/null
++++ conf/supervisord/supervisord.conf
+@@ -0,0 +1,14 @@
++; Sample Supervisor.d script that includes loading a master supervisor config
++
++[supervisord]
++logfile = /tmp/supervisord.log
++logfile_maxbytes = 50MB
++logfile_backups=10
++loglevel = info
++pidfile = /tmp/supervisord.pid
++nodaemon = false
++minfds = 1024
++minprocs = 200
++
++[include]
++files = hbase-master.supervisord.conf

@@ -1,0 +1,690 @@
+From e32900ef1288f0d28b5f438be7eb52d8608af7ce Mon Sep 17 00:00:00 2001
+From: meiyi <myimeiyi@gamil.com>
+Date: Thu, 28 Feb 2019 21:21:07 +0800
+Subject: [PATCH] HBASE-21974 Change Admin#grant/revoke parameter from
+ UserPermission to user and Permission
+
+---
+ .../java/org/apache/hadoop/hbase/client/Admin.java |  15 +--
+ .../org/apache/hadoop/hbase/client/AsyncAdmin.java |  13 ++-
+ .../hadoop/hbase/client/AsyncHBaseAdmin.java       |  10 +-
+ .../org/apache/hadoop/hbase/client/HBaseAdmin.java |  12 ++-
+ .../hadoop/hbase/client/RawAsyncHBaseAdmin.java    |  20 ++--
+ .../hbase/security/access/AccessControlClient.java |  25 ++---
+ .../hbase/security/access/PermissionBuilder.java   |  67 +++++++++++++
+ .../hbase/security/access/AccessController.java    |   9 +-
+ .../hbase/security/access/SecureTestUtil.java      |  17 ++--
+ .../security/access/TestAccessController.java      |  11 +--
+ .../security/access/TestNamespaceCommands.java     |  18 ++--
+ .../security/access/TestPermissionBuilder.java     | 104 +++++++++++++++++++++
+ .../hadoop/hbase/thrift2/client/ThriftAdmin.java   |   6 +-
+ 13 files changed, 248 insertions(+), 79 deletions(-)
+ create mode 100644 hbase-client/src/main/java/org/apache/hadoop/hbase/security/access/PermissionBuilder.java
+ create mode 100644 hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestPermissionBuilder.java
+
+diff --git hbase-client/src/main/java/org/apache/hadoop/hbase/client/Admin.java hbase-client/src/main/java/org/apache/hadoop/hbase/client/Admin.java
+index 054702a..99db7d5 100644
+--- hbase-client/src/main/java/org/apache/hadoop/hbase/client/Admin.java
++++ hbase-client/src/main/java/org/apache/hadoop/hbase/client/Admin.java
+@@ -53,7 +53,7 @@ import org.apache.hadoop.hbase.replication.ReplicationException;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerDescription;
+ import org.apache.hadoop.hbase.replication.SyncReplicationState;
+-import org.apache.hadoop.hbase.security.access.UserPermission;
++import org.apache.hadoop.hbase.security.access.Permission;
+ import org.apache.hadoop.hbase.snapshot.HBaseSnapshotException;
+ import org.apache.hadoop.hbase.snapshot.RestoreSnapshotException;
+ import org.apache.hadoop.hbase.snapshot.SnapshotCreationException;
+@@ -2845,20 +2845,21 @@ public interface Admin extends Abortable, Closeable {
+ 
+   /**
+    * Grants user specific permissions
+-   *
+-   * @param userPermission user and permissions
++   * @param userName user name
++   * @param permission the specific permission
+    * @param mergeExistingPermissions If set to false, later granted permissions will override
+    *          previous granted permissions. otherwise, it'll merge with previous granted
+    *          permissions.
+    * @throws IOException if a remote or network exception occurs
+    */
+-  void grant(UserPermission userPermission, boolean mergeExistingPermissions) throws IOException;
++  void grant(String userName, Permission permission, boolean mergeExistingPermissions)
++      throws IOException;
+ 
+   /**
+    * Revokes user specific permissions
+-   *
+-   * @param userPermission user and permissions
++   * @param userName user name
++   * @param permission the specific permission
+    * @throws IOException if a remote or network exception occurs
+    */
+-  void revoke(UserPermission userPermission) throws IOException;
++  void revoke(String userName, Permission permission) throws IOException;
+ }
+diff --git hbase-client/src/main/java/org/apache/hadoop/hbase/client/AsyncAdmin.java hbase-client/src/main/java/org/apache/hadoop/hbase/client/AsyncAdmin.java
+index b45a040..7284ae4 100644
+--- hbase-client/src/main/java/org/apache/hadoop/hbase/client/AsyncAdmin.java
++++ hbase-client/src/main/java/org/apache/hadoop/hbase/client/AsyncAdmin.java
+@@ -45,7 +45,7 @@ import org.apache.hadoop.hbase.quotas.SpaceQuotaSnapshotView;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerDescription;
+ import org.apache.hadoop.hbase.replication.SyncReplicationState;
+-import org.apache.hadoop.hbase.security.access.UserPermission;
++import org.apache.hadoop.hbase.security.access.Permission;
+ import org.apache.yetus.audience.InterfaceAudience;
+ 
+ /**
+@@ -1338,16 +1338,19 @@ public interface AsyncAdmin {
+ 
+   /**
+    * Grants user specific permissions
+-   * @param userPermission user and permissions
++   * @param userName user name
++   * @param permission the specific permission
+    * @param mergeExistingPermissions If set to false, later granted permissions will override
+    *          previous granted permissions. otherwise, it'll merge with previous granted
+    *          permissions.
+    */
+-  CompletableFuture<Void> grant(UserPermission userPermission, boolean mergeExistingPermissions);
++  CompletableFuture<Void> grant(String userName, Permission permission,
++      boolean mergeExistingPermissions);
+ 
+   /**
+    * Revokes user specific permissions
+-   * @param userPermission user and permissions
++   * @param userName user name
++   * @param permission the specific permission
+    */
+-  CompletableFuture<Void> revoke(UserPermission userPermission);
++  CompletableFuture<Void> revoke(String userName, Permission permission);
+ }
+diff --git hbase-client/src/main/java/org/apache/hadoop/hbase/client/AsyncHBaseAdmin.java hbase-client/src/main/java/org/apache/hadoop/hbase/client/AsyncHBaseAdmin.java
+index 960b72a..78c530e 100644
+--- hbase-client/src/main/java/org/apache/hadoop/hbase/client/AsyncHBaseAdmin.java
++++ hbase-client/src/main/java/org/apache/hadoop/hbase/client/AsyncHBaseAdmin.java
+@@ -42,7 +42,7 @@ import org.apache.hadoop.hbase.quotas.SpaceQuotaSnapshot;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerDescription;
+ import org.apache.hadoop.hbase.replication.SyncReplicationState;
+-import org.apache.hadoop.hbase.security.access.UserPermission;
++import org.apache.hadoop.hbase.security.access.Permission;
+ import org.apache.hadoop.hbase.util.FutureUtils;
+ import org.apache.yetus.audience.InterfaceAudience;
+ 
+@@ -797,13 +797,13 @@ class AsyncHBaseAdmin implements AsyncAdmin {
+   }
+ 
+   @Override
+-  public CompletableFuture<Void> grant(UserPermission userPermission,
++  public CompletableFuture<Void> grant(String userName, Permission permission,
+       boolean mergeExistingPermissions) {
+-    return wrap(rawAdmin.grant(userPermission, mergeExistingPermissions));
++    return wrap(rawAdmin.grant(userName, permission, mergeExistingPermissions));
+   }
+ 
+   @Override
+-  public CompletableFuture<Void> revoke(UserPermission userPermission) {
+-    return wrap(rawAdmin.revoke(userPermission));
++  public CompletableFuture<Void> revoke(String userName, Permission permission) {
++    return wrap(rawAdmin.revoke(userName, permission));
+   }
+ }
+diff --git hbase-client/src/main/java/org/apache/hadoop/hbase/client/HBaseAdmin.java hbase-client/src/main/java/org/apache/hadoop/hbase/client/HBaseAdmin.java
+index f740218..6a38ead 100644
+--- hbase-client/src/main/java/org/apache/hadoop/hbase/client/HBaseAdmin.java
++++ hbase-client/src/main/java/org/apache/hadoop/hbase/client/HBaseAdmin.java
+@@ -91,6 +91,7 @@ import org.apache.hadoop.hbase.replication.ReplicationException;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerDescription;
+ import org.apache.hadoop.hbase.replication.SyncReplicationState;
++import org.apache.hadoop.hbase.security.access.Permission;
+ import org.apache.hadoop.hbase.security.access.ShadedAccessControlUtil;
+ import org.apache.hadoop.hbase.security.access.UserPermission;
+ import org.apache.hadoop.hbase.snapshot.ClientSnapshotDescriptionUtils;
+@@ -4484,13 +4485,13 @@ public class HBaseAdmin implements Admin {
+   }
+ 
+   @Override
+-  public void grant(UserPermission userPermission, boolean mergeExistingPermissions)
++  public void grant(String userName, Permission permission, boolean mergeExistingPermissions)
+       throws IOException {
+     executeCallable(new MasterCallable<Void>(getConnection(), getRpcControllerFactory()) {
+       @Override
+       protected Void rpcCall() throws Exception {
+-        GrantRequest req =
+-            ShadedAccessControlUtil.buildGrantRequest(userPermission, mergeExistingPermissions);
++        GrantRequest req = ShadedAccessControlUtil
++            .buildGrantRequest(new UserPermission(userName, permission), mergeExistingPermissions);
+         this.master.grant(getRpcController(), req);
+         return null;
+       }
+@@ -4498,11 +4499,12 @@ public class HBaseAdmin implements Admin {
+   }
+ 
+   @Override
+-  public void revoke(UserPermission userPermission) throws IOException {
++  public void revoke(String userName, Permission permission) throws IOException {
+     executeCallable(new MasterCallable<Void>(getConnection(), getRpcControllerFactory()) {
+       @Override
+       protected Void rpcCall() throws Exception {
+-        RevokeRequest req = ShadedAccessControlUtil.buildRevokeRequest(userPermission);
++        RevokeRequest req =
++            ShadedAccessControlUtil.buildRevokeRequest(new UserPermission(userName, permission));
+         this.master.revoke(getRpcController(), req);
+         return null;
+       }
+diff --git hbase-client/src/main/java/org/apache/hadoop/hbase/client/RawAsyncHBaseAdmin.java hbase-client/src/main/java/org/apache/hadoop/hbase/client/RawAsyncHBaseAdmin.java
+index 8dc3b01..04ed3c5 100644
+--- hbase-client/src/main/java/org/apache/hadoop/hbase/client/RawAsyncHBaseAdmin.java
++++ hbase-client/src/main/java/org/apache/hadoop/hbase/client/RawAsyncHBaseAdmin.java
+@@ -85,6 +85,7 @@ import org.apache.hadoop.hbase.replication.ReplicationException;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerDescription;
+ import org.apache.hadoop.hbase.replication.SyncReplicationState;
++import org.apache.hadoop.hbase.security.access.Permission;
+ import org.apache.hadoop.hbase.security.access.ShadedAccessControlUtil;
+ import org.apache.hadoop.hbase.security.access.UserPermission;
+ import org.apache.hadoop.hbase.snapshot.ClientSnapshotDescriptionUtils;
+@@ -3752,21 +3753,24 @@ class RawAsyncHBaseAdmin implements AsyncAdmin {
+   }
+ 
+   @Override
+-  public CompletableFuture<Void> grant(UserPermission userPermission,
++  public CompletableFuture<Void> grant(String userName, Permission permission,
+       boolean mergeExistingPermissions) {
+     return this.<Void> newMasterCaller()
+-        .action((controller, stub) -> this.<GrantRequest, GrantResponse, Void> call(controller,
+-          stub, ShadedAccessControlUtil.buildGrantRequest(userPermission, mergeExistingPermissions),
+-          (s, c, req, done) -> s.grant(c, req, done), resp -> null))
++        .action(
++          (controller, stub) -> this.<GrantRequest, GrantResponse, Void> call(controller, stub,
++            ShadedAccessControlUtil.buildGrantRequest(new UserPermission(userName, permission),
++              mergeExistingPermissions),
++            (s, c, req, done) -> s.grant(c, req, done), resp -> null))
+         .call();
+   }
+ 
+   @Override
+-  public CompletableFuture<Void> revoke(UserPermission userPermission) {
++  public CompletableFuture<Void> revoke(String userName, Permission permission) {
+     return this.<Void> newMasterCaller()
+-        .action((controller, stub) -> this.<RevokeRequest, RevokeResponse, Void> call(controller,
+-          stub, ShadedAccessControlUtil.buildRevokeRequest(userPermission),
+-          (s, c, req, done) -> s.revoke(c, req, done), resp -> null))
++        .action(
++          (controller, stub) -> this.<RevokeRequest, RevokeResponse, Void> call(controller, stub,
++            ShadedAccessControlUtil.buildRevokeRequest(new UserPermission(userName, permission)),
++            (s, c, req, done) -> s.revoke(c, req, done), resp -> null))
+         .call();
+   }
+ }
+diff --git hbase-client/src/main/java/org/apache/hadoop/hbase/security/access/AccessControlClient.java hbase-client/src/main/java/org/apache/hadoop/hbase/security/access/AccessControlClient.java
+index 1031cfe..5673800 100644
+--- hbase-client/src/main/java/org/apache/hadoop/hbase/security/access/AccessControlClient.java
++++ hbase-client/src/main/java/org/apache/hadoop/hbase/security/access/AccessControlClient.java
+@@ -94,9 +94,8 @@ public class AccessControlClient {
+       final String userName, final byte[] family, final byte[] qual, boolean mergeExistingPermissions,
+       final Permission.Action... actions) throws Throwable {
+     // TODO: Priority is not used.
+-    UserPermission userPermission =
+-        new UserPermission(userName, new TablePermission(tableName, family, qual, actions));
+-    connection.getAdmin().grant(userPermission, mergeExistingPermissions);
++    connection.getAdmin().grant(userName, new TablePermission(tableName, family, qual, actions),
++      mergeExistingPermissions);
+   }
+ 
+   /**
+@@ -128,9 +127,8 @@ public class AccessControlClient {
+    */
+   private static void grant(Connection connection, final String namespace, final String userName,
+       boolean mergeExistingPermissions, final Permission.Action... actions) throws Throwable {
+-    UserPermission userPermission =
+-        new UserPermission(userName, new NamespacePermission(namespace, actions));
+-    connection.getAdmin().grant(userPermission, mergeExistingPermissions);
++    connection.getAdmin().grant(userName, new NamespacePermission(namespace, actions),
++      mergeExistingPermissions);
+   }
+ 
+   /**
+@@ -160,8 +158,7 @@ public class AccessControlClient {
+    */
+   private static void grant(Connection connection, final String userName,
+       boolean mergeExistingPermissions, final Permission.Action... actions) throws Throwable {
+-    UserPermission userPermission = new UserPermission(userName, new GlobalPermission(actions));
+-    connection.getAdmin().grant(userPermission, mergeExistingPermissions);
++    connection.getAdmin().grant(userName, new GlobalPermission(actions), mergeExistingPermissions);
+   }
+ 
+   /**
+@@ -198,9 +195,8 @@ public class AccessControlClient {
+   public static void revoke(Connection connection, final TableName tableName,
+       final String username, final byte[] family, final byte[] qualifier,
+       final Permission.Action... actions) throws Throwable {
+-    UserPermission userPermission =
+-        new UserPermission(username, new TablePermission(tableName, family, qualifier, actions));
+-    connection.getAdmin().revoke(userPermission);
++    connection.getAdmin().revoke(username,
++      new TablePermission(tableName, family, qualifier, actions));
+   }
+ 
+   /**
+@@ -213,9 +209,7 @@ public class AccessControlClient {
+    */
+   public static void revoke(Connection connection, final String namespace,
+       final String userName, final Permission.Action... actions) throws Throwable {
+-    UserPermission userPermission =
+-        new UserPermission(userName, new NamespacePermission(namespace, actions));
+-    connection.getAdmin().revoke(userPermission);
++    connection.getAdmin().revoke(userName, new NamespacePermission(namespace, actions));
+   }
+ 
+   /**
+@@ -224,8 +218,7 @@ public class AccessControlClient {
+    */
+   public static void revoke(Connection connection, final String userName,
+       final Permission.Action... actions) throws Throwable {
+-    UserPermission userPermission = new UserPermission(userName, new GlobalPermission(actions));
+-    connection.getAdmin().revoke(userPermission);
++    connection.getAdmin().revoke(userName, new GlobalPermission(actions));
+   }
+ 
+   /**
+diff --git hbase-client/src/main/java/org/apache/hadoop/hbase/security/access/PermissionBuilder.java hbase-client/src/main/java/org/apache/hadoop/hbase/security/access/PermissionBuilder.java
+new file mode 100644
+index 0000000..8fbe703
+--- /dev/null
++++ hbase-client/src/main/java/org/apache/hadoop/hbase/security/access/PermissionBuilder.java
+@@ -0,0 +1,67 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hbase.security.access;
++
++import org.apache.hadoop.hbase.TableName;
++import org.apache.hadoop.hbase.security.access.Permission.Action;
++import org.apache.yetus.audience.InterfaceAudience;
++
++@InterfaceAudience.Private
++public class PermissionBuilder {
++  private String namespace;
++  private TableName tableName;
++  private byte[] family;
++  private byte[] qualifier;
++  private Action[] actions;
++
++  public PermissionBuilder(String namespace) {
++    this.namespace = namespace;
++  }
++
++  public PermissionBuilder(TableName tableName) {
++    this.tableName = tableName;
++  }
++
++  public PermissionBuilder() {
++  }
++
++  public PermissionBuilder setFamily(byte[] family) {
++    this.family = family;
++    return this;
++  }
++
++  public PermissionBuilder setQualifier(byte[] qualifier) {
++    this.qualifier = qualifier;
++    return this;
++  }
++
++  public PermissionBuilder setActions(Action... actions) {
++    this.actions = actions;
++    return this;
++  }
++
++  public Permission build() {
++    if (namespace != null) {
++      return new NamespacePermission(namespace, actions);
++    } else if (tableName != null) {
++      return new TablePermission(tableName, family, qualifier, actions);
++    } else {
++      return new GlobalPermission(actions);
++    }
++  }
++}
+diff --git hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessController.java hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessController.java
+index dcf44b8..7858697 100644
+--- hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessController.java
++++ hbase-server/src/main/java/org/apache/hadoop/hbase/security/access/AccessController.java
+@@ -2053,7 +2053,7 @@ public class AccessController implements MasterCoprocessor, RegionCoprocessor,
+   /* ---- Protobuf AccessControlService implementation ---- */
+ 
+   /**
+-   * @deprecated Use {@link Admin#grant(UserPermission, boolean)} instead.
++   * @deprecated Use {@link Admin#grant(String, Permission, boolean)} instead.
+    */
+   @Deprecated
+   @Override
+@@ -2076,7 +2076,8 @@ public class AccessController implements MasterCoprocessor, RegionCoprocessor,
+         preGrantOrRevoke(caller, "grant", perm);
+ 
+         // regionEnv is set at #start. Hopefully not null at this point.
+-        regionEnv.getConnection().getAdmin().grant(perm, request.getMergeExistingPermissions());
++        regionEnv.getConnection().getAdmin().grant(perm.getUser(), perm.getPermission(),
++          request.getMergeExistingPermissions());
+         if (AUDITLOG.isTraceEnabled()) {
+           // audit log should store permission changes in addition to auth results
+           AUDITLOG.trace("Granted permission " + perm.toString());
+@@ -2094,7 +2095,7 @@ public class AccessController implements MasterCoprocessor, RegionCoprocessor,
+   }
+ 
+   /**
+-   * @deprecated Use {@link Admin#revoke(UserPermission)} instead.
++   * @deprecated Use {@link Admin#revoke(String, Permission)} instead.
+    */
+   @Deprecated
+   @Override
+@@ -2115,7 +2116,7 @@ public class AccessController implements MasterCoprocessor, RegionCoprocessor,
+         }
+         preGrantOrRevoke(caller, "revoke", perm);
+         // regionEnv is set at #start. Hopefully not null here.
+-        regionEnv.getConnection().getAdmin().revoke(perm);
++        regionEnv.getConnection().getAdmin().revoke(perm.getUser(), perm.getPermission());
+         if (AUDITLOG.isTraceEnabled()) {
+           // audit log should record all permission changes
+           AUDITLOG.trace("Revoked permission " + perm.toString());
+diff --git hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/SecureTestUtil.java hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/SecureTestUtil.java
+index e392b3b..3d717f2 100644
+--- hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/SecureTestUtil.java
++++ hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/SecureTestUtil.java
+@@ -374,8 +374,7 @@ public class SecureTestUtil {
+       @Override
+       public Void call() throws Exception {
+         try (Connection connection = ConnectionFactory.createConnection(util.getConfiguration())) {
+-          connection.getAdmin().grant(new UserPermission(user, new GlobalPermission(actions)),
+-            false);
++          connection.getAdmin().grant(user, new GlobalPermission(actions), false);
+         }
+         return null;
+       }
+@@ -393,7 +392,7 @@ public class SecureTestUtil {
+       @Override
+       public Void call() throws Exception {
+         try (Connection connection = ConnectionFactory.createConnection(util.getConfiguration())) {
+-          connection.getAdmin().revoke(new UserPermission(user, new GlobalPermission(actions)));
++          connection.getAdmin().revoke(user, new GlobalPermission(actions));
+         }
+         return null;
+       }
+@@ -412,7 +411,7 @@ public class SecureTestUtil {
+       public Void call() throws Exception {
+         try (Connection connection = ConnectionFactory.createConnection(util.getConfiguration())) {
+           connection.getAdmin()
+-              .grant(new UserPermission(user, new NamespacePermission(namespace, actions)), false);
++              .grant(user, new NamespacePermission(namespace, actions), false);
+         }
+         return null;
+       }
+@@ -472,8 +471,7 @@ public class SecureTestUtil {
+       @Override
+       public Void call() throws Exception {
+         try (Connection connection = ConnectionFactory.createConnection(util.getConfiguration())) {
+-          connection.getAdmin()
+-              .revoke(new UserPermission(user, new NamespacePermission(namespace, actions)));
++          connection.getAdmin().revoke(user, new NamespacePermission(namespace, actions));
+         }
+         return null;
+       }
+@@ -492,8 +490,7 @@ public class SecureTestUtil {
+       @Override
+       public Void call() throws Exception {
+         try (Connection connection = ConnectionFactory.createConnection(util.getConfiguration())) {
+-          connection.getAdmin().grant(
+-            new UserPermission(user, new TablePermission(table, family, qualifier, actions)),
++          connection.getAdmin().grant(user, new TablePermission(table, family, qualifier, actions),
+             false);
+         }
+         return null;
+@@ -555,8 +552,8 @@ public class SecureTestUtil {
+       @Override
+       public Void call() throws Exception {
+         try (Connection connection = ConnectionFactory.createConnection(util.getConfiguration())) {
+-          connection.getAdmin().revoke(
+-            new UserPermission(user, new TablePermission(table, family, qualifier, actions)));
++          connection.getAdmin().revoke(user,
++            new TablePermission(table, family, qualifier, actions));
+         }
+         return null;
+       }
+diff --git hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestAccessController.java hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestAccessController.java
+index 2463eb0..3d6dab0 100644
+--- hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestAccessController.java
++++ hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestAccessController.java
+@@ -1171,9 +1171,8 @@ public class TestAccessController extends SecureTestUtil {
+       @Override
+       public Object run() throws Exception {
+         try (Connection conn = ConnectionFactory.createConnection(conf)) {
+-          conn.getAdmin().grant(new UserPermission(USER_RO.getShortName(),
+-              new TablePermission(TEST_TABLE, TEST_FAMILY, Action.READ)),
+-            false);
++          conn.getAdmin().grant(USER_RO.getShortName(),
++            new TablePermission(TEST_TABLE, TEST_FAMILY, Action.READ), false);
+         }
+         return null;
+       }
+@@ -1182,9 +1181,9 @@ public class TestAccessController extends SecureTestUtil {
+     AccessTestAction revokeAction = new AccessTestAction() {
+       @Override
+       public Object run() throws Exception {
+-        try(Connection conn = ConnectionFactory.createConnection(conf)) {
+-            conn.getAdmin().revoke(new UserPermission(USER_RO.getShortName(),
+-                            new TablePermission(TEST_TABLE, TEST_FAMILY, Action.READ)));
++        try (Connection conn = ConnectionFactory.createConnection(conf)) {
++          conn.getAdmin().revoke(USER_RO.getShortName(), new PermissionBuilder(TEST_TABLE)
++              .setFamily(TEST_FAMILY).setActions(Action.READ).build());
+         }
+         return null;
+       }
+diff --git hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestNamespaceCommands.java hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestNamespaceCommands.java
+index fa8543e..04e8092 100644
+--- hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestNamespaceCommands.java
++++ hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestNamespaceCommands.java
+@@ -363,9 +363,8 @@ public class TestNamespaceCommands extends SecureTestUtil {
+       @Override
+       public Object run() throws Exception {
+         try (Connection connection = ConnectionFactory.createConnection(conf)) {
+-          connection.getAdmin().grant(
+-            new UserPermission(testUser, new NamespacePermission(TEST_NAMESPACE, Action.WRITE)),
+-            false);
++          connection.getAdmin().grant(testUser,
++            new NamespacePermission(TEST_NAMESPACE, Action.WRITE), false);
+         }
+         return null;
+       }
+@@ -374,9 +373,8 @@ public class TestNamespaceCommands extends SecureTestUtil {
+       @Override
+       public Object run() throws Exception {
+         try (Connection conn = ConnectionFactory.createConnection(conf)) {
+-          conn.getAdmin().grant(
+-            new UserPermission(USER_GROUP_NS_ADMIN.getShortName(), TEST_NAMESPACE, Action.READ),
+-            false);
++          conn.getAdmin().grant(USER_GROUP_NS_ADMIN.getShortName(),
++            new NamespacePermission(TEST_NAMESPACE, Action.READ), false);
+         }
+         return null;
+       }
+@@ -386,8 +384,8 @@ public class TestNamespaceCommands extends SecureTestUtil {
+       @Override
+       public Object run() throws Exception {
+         try (Connection connection = ConnectionFactory.createConnection(conf)) {
+-          connection.getAdmin().revoke(
+-            new UserPermission(testUser, new NamespacePermission(TEST_NAMESPACE, Action.WRITE)));
++          connection.getAdmin().revoke(testUser,
++            new NamespacePermission(TEST_NAMESPACE, Action.WRITE));
+         }
+         return null;
+       }
+@@ -396,8 +394,8 @@ public class TestNamespaceCommands extends SecureTestUtil {
+       @Override
+       public Object run() throws Exception {
+         try (Connection connection = ConnectionFactory.createConnection(conf)) {
+-          connection.getAdmin().revoke(new UserPermission(USER_GROUP_NS_ADMIN.getShortName(),
+-              new NamespacePermission(TEST_NAMESPACE, Action.READ)));
++          connection.getAdmin().revoke(USER_GROUP_NS_ADMIN.getShortName(),
++            new NamespacePermission(TEST_NAMESPACE, Action.READ));
+         }
+         return null;
+       }
+diff --git hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestPermissionBuilder.java hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestPermissionBuilder.java
+new file mode 100644
+index 0000000..2df5f32
+--- /dev/null
++++ hbase-server/src/test/java/org/apache/hadoop/hbase/security/access/TestPermissionBuilder.java
+@@ -0,0 +1,104 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hbase.security.access;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertTrue;
++
++import org.apache.hadoop.hbase.HBaseClassTestRule;
++import org.apache.hadoop.hbase.TableName;
++import org.apache.hadoop.hbase.security.access.Permission.Action;
++import org.apache.hadoop.hbase.testclassification.SecurityTests;
++import org.apache.hadoop.hbase.testclassification.SmallTests;
++import org.apache.hadoop.hbase.util.Bytes;
++import org.junit.ClassRule;
++import org.junit.Test;
++import org.junit.experimental.categories.Category;
++
++@Category({ SecurityTests.class, SmallTests.class })
++public class TestPermissionBuilder {
++
++  @ClassRule
++  public static final HBaseClassTestRule CLASS_RULE =
++      HBaseClassTestRule.forClass(TestPermissionBuilder.class);
++
++  @Test
++  public void testBuildGlobalPermission() {
++    // check global permission with empty action
++    Permission permission = new PermissionBuilder().build();
++    assertTrue(permission instanceof GlobalPermission);
++    assertEquals(0, permission.getActions().length);
++
++    // check global permission with ADMIN action
++    permission = new PermissionBuilder().setActions(Action.ADMIN).build();
++    assertTrue(permission instanceof GlobalPermission);
++    assertEquals(1, permission.getActions().length);
++    assertTrue(permission.getActions()[0] == Action.ADMIN);
++  }
++
++  @Test
++  public void testBuildNamespacePermission() {
++    String namespace = "ns";
++    // check namespace permission with CREATE and READ actions
++    Permission permission =
++        new PermissionBuilder(namespace).setActions(Action.CREATE, Action.READ).build();
++    assertTrue(permission instanceof NamespacePermission);
++    NamespacePermission namespacePermission = (NamespacePermission) permission;
++    assertEquals(namespace, namespacePermission.getNamespace());
++    assertEquals(2, permission.getActions().length);
++    assertEquals(Action.READ, permission.getActions()[0]);
++    assertEquals(Action.CREATE, permission.getActions()[1]);
++  }
++
++  @Test
++  public void testBuildTablePermission() {
++    TableName tableName = TableName.valueOf("ns", "table");
++    byte[] family = Bytes.toBytes("f");
++    byte[] qualifier = Bytes.toBytes("q");
++    // check table permission without family or qualifier
++    Permission permission =
++        new PermissionBuilder(tableName).setActions(Action.WRITE, Action.READ).build();
++    assertTrue(permission instanceof TablePermission);
++    assertEquals(2, permission.getActions().length);
++    assertEquals(Action.READ, permission.getActions()[0]);
++    assertEquals(Action.WRITE, permission.getActions()[1]);
++    TablePermission tPerm = (TablePermission) permission;
++    assertEquals(tableName, tPerm.getTableName());
++    assertEquals(null, tPerm.getFamily());
++    assertEquals(null, tPerm.getQualifier());
++
++    // check table permission with family
++    permission = new PermissionBuilder(tableName).setFamily(family).setActions(Action.EXEC).build();
++    assertTrue(permission instanceof TablePermission);
++    assertEquals(1, permission.getActions().length);
++    assertEquals(Action.EXEC, permission.getActions()[0]);
++    tPerm = (TablePermission) permission;
++    assertEquals(tableName, tPerm.getTableName());
++    assertTrue(Bytes.equals(family, tPerm.getFamily()));
++    assertTrue(Bytes.equals(null, tPerm.getQualifier()));
++
++    // check table permission with family and qualifier
++    permission = new PermissionBuilder(tableName).setFamily(family).setQualifier(qualifier).build();
++    assertTrue(permission instanceof TablePermission);
++    assertEquals(0, permission.getActions().length);
++    tPerm = (TablePermission) permission;
++    assertEquals(tableName, tPerm.getTableName());
++    assertTrue(Bytes.equals(family, tPerm.getFamily()));
++    assertTrue(Bytes.equals(qualifier, tPerm.getQualifier()));
++  }
++}
+diff --git hbase-thrift/src/main/java/org/apache/hadoop/hbase/thrift2/client/ThriftAdmin.java hbase-thrift/src/main/java/org/apache/hadoop/hbase/thrift2/client/ThriftAdmin.java
+index 4063a3c..ccc798f 100644
+--- hbase-thrift/src/main/java/org/apache/hadoop/hbase/thrift2/client/ThriftAdmin.java
++++ hbase-thrift/src/main/java/org/apache/hadoop/hbase/thrift2/client/ThriftAdmin.java
+@@ -60,7 +60,7 @@ import org.apache.hadoop.hbase.replication.ReplicationException;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
+ import org.apache.hadoop.hbase.replication.ReplicationPeerDescription;
+ import org.apache.hadoop.hbase.replication.SyncReplicationState;
+-import org.apache.hadoop.hbase.security.access.UserPermission;
++import org.apache.hadoop.hbase.security.access.Permission;
+ import org.apache.hadoop.hbase.thrift2.ThriftUtilities;
+ import org.apache.hadoop.hbase.thrift2.generated.TColumnFamilyDescriptor;
+ import org.apache.hadoop.hbase.thrift2.generated.THBaseService;
+@@ -1434,12 +1434,12 @@ public class ThriftAdmin implements Admin {
+   }
+ 
+   @Override
+-  public void grant(UserPermission userPermission, boolean mergeExistingPermissions) {
++  public void grant(String userName, Permission permission, boolean mergeExistingPermissions) {
+     throw new NotImplementedException("grant not supported in ThriftAdmin");
+   }
+ 
+   @Override
+-  public void revoke(UserPermission userPermission) {
++  public void revoke(String userName, Permission permission) {
+     throw new NotImplementedException("revoke not supported in ThriftAdmin");
+   }
+ }
+-- 
+2.7.4
+

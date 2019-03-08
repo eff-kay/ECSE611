@@ -1,0 +1,1050 @@
+From 4c955cb2d1714b63ebcbb3cfbe25aeac7b62ea1b Mon Sep 17 00:00:00 2001
+From: James <james_email@sina.cn>
+Date: Sun, 12 Feb 2017 17:01:45 +0800
+Subject: [PATCH] HBASE-14006 add num versions to rowWithColumns
+
+---
+ .../hadoop/hbase/thrift/ThriftServerRunner.java    |  73 ++++-
+ .../hadoop/hbase/thrift/ThriftUtilities.java       |  18 +-
+ .../hadoop/hbase/thrift/generated/Hbase.java       | 312 ++++++++++++++++++---
+ .../org/apache/hadoop/hbase/thrift/Hbase.thrift    |  10 +-
+ .../hadoop/hbase/thrift/TestThriftServer.java      |  21 +-
+ 5 files changed, 382 insertions(+), 52 deletions(-)
+
+diff --git a/hbase-thrift/src/main/java/org/apache/hadoop/hbase/thrift/ThriftServerRunner.java b/hbase-thrift/src/main/java/org/apache/hadoop/hbase/thrift/ThriftServerRunner.java
+index 169d42f..a9f7791 100644
+--- a/hbase-thrift/src/main/java/org/apache/hadoop/hbase/thrift/ThriftServerRunner.java
++++ b/hbase-thrift/src/main/java/org/apache/hadoop/hbase/thrift/ThriftServerRunner.java
+@@ -1064,11 +1064,38 @@ public class ThriftServerRunner implements Runnable {
+     @Override
+     public List<TRowResult> getRowWithColumns(ByteBuffer tableName,
+                                               ByteBuffer row,
+-        List<ByteBuffer> columns,
++        List<ByteBuffer> columns, int numVersions,
+         Map<ByteBuffer, ByteBuffer> attributes) throws IOError {
+-      return getRowWithColumnsTs(tableName, row, columns,
+-                                 HConstants.LATEST_TIMESTAMP,
+-                                 attributes);
++
++      Table table = null;
++      try {
++        table = getTable(tableName);
++        if (columns == null) {
++          Get get = new Get(getBytes(row));
++          addAttributes(get, attributes);
++          get.setMaxVersions(numVersions);
++          Result result = table.get(get);
++          return ThriftUtilities.rowResultFromHBase(result);
++        }
++        Get get = new Get(getBytes(row));
++        addAttributes(get, attributes);
++        for(ByteBuffer column : columns) {
++          byte [][] famAndQf = KeyValue.parseColumn(getBytes(column));
++          if (famAndQf.length == 1) {
++              get.addFamily(famAndQf[0]);
++          } else {
++              get.addColumn(famAndQf[0], famAndQf[1]);
++          }
++        }
++        get.setMaxVersions(numVersions);
++        Result result = table.get(get);
++        return ThriftUtilities.rowResultFromHBase(result);
++      } catch (IOException e) {
++        LOG.warn(e.getMessage(), e);
++        throw new IOError(Throwables.getStackTraceAsString(e));
++      } finally{
++        closeTable(table);
++      }
+     }
+ 
+     @Override
+@@ -1127,11 +1154,41 @@ public class ThriftServerRunner implements Runnable {
+     @Override
+     public List<TRowResult> getRowsWithColumns(ByteBuffer tableName,
+                                                List<ByteBuffer> rows,
+-        List<ByteBuffer> columns,
++        List<ByteBuffer> columns, int numVersions,
+         Map<ByteBuffer, ByteBuffer> attributes) throws IOError {
+-      return getRowsWithColumnsTs(tableName, rows, columns,
+-                                  HConstants.LATEST_TIMESTAMP,
+-                                  attributes);
++
++      Table table= null;
++      try {
++        List<Get> gets = new ArrayList<Get>(rows.size());
++        table = getTable(tableName);
++        if (metrics != null) {
++          metrics.incNumRowKeysInBatchGet(rows.size());
++        }
++        for (ByteBuffer row : rows) {
++          Get get = new Get(getBytes(row));
++          addAttributes(get, attributes);
++          if (columns != null) {
++
++            for(ByteBuffer column : columns) {
++              byte [][] famAndQf = KeyValue.parseColumn(getBytes(column));
++              if (famAndQf.length == 1) {
++                get.addFamily(famAndQf[0]);
++              } else {
++                get.addColumn(famAndQf[0], famAndQf[1]);
++              }
++            }
++          }
++          get.setMaxVersions(numVersions);
++          gets.add(get);
++        }
++        Result[] result = table.get(gets);
++        return ThriftUtilities.rowResultFromHBase(result);
++      } catch (IOException e) {
++        LOG.warn(e.getMessage(), e);
++        throw new IOError(Throwables.getStackTraceAsString(e));
++      } finally{
++        closeTable(table);
++      }
+     }
+ 
+     @Override
+diff --git a/hbase-thrift/src/main/java/org/apache/hadoop/hbase/thrift/ThriftUtilities.java b/hbase-thrift/src/main/java/org/apache/hadoop/hbase/thrift/ThriftUtilities.java
+index d2a95ce..5c3f1eb 100644
+--- a/hbase-thrift/src/main/java/org/apache/hadoop/hbase/thrift/ThriftUtilities.java
++++ b/hbase-thrift/src/main/java/org/apache/hadoop/hbase/thrift/ThriftUtilities.java
+@@ -167,10 +167,20 @@ public class ThriftUtilities {
+         } else {
+           result.columns = new TreeMap<ByteBuffer, TCell>();
+           for (Cell kv : result_.rawCells()) {
+-            result.columns.put(
+-                ByteBuffer.wrap(KeyValue.makeColumn(CellUtil.cloneFamily(kv),
+-                    CellUtil.cloneQualifier(kv))),
+-                new TCell(ByteBuffer.wrap(CellUtil.cloneValue(kv)), kv.getTimestamp()));
++            ByteBuffer column =
++              ByteBuffer.wrap(KeyValue.makeColumn(CellUtil.cloneFamily(kv),
++                    CellUtil.cloneQualifier(kv)));
++            TCell cell =  new TCell(ByteBuffer.wrap(CellUtil.cloneValue(kv)), kv.getTimestamp());
++
++            //Let`s make it clear here. When we put cells into the map of result, we choose the the one who has smallest timestamp.
++            //So that when you retrieve data with parameters which will give you more than one version, you will clearly know which one you will get.
++            if(result.columns.containsKey(column)){
++                if(cell.getTimestamp() > result.columns.get(column).getTimestamp()){
++                    continue;
++                }
++            }
++
++            result.columns.put(column, cell);
+           }
+         }
+       results.add(result);
+diff --git a/hbase-thrift/src/main/java/org/apache/hadoop/hbase/thrift/generated/Hbase.java b/hbase-thrift/src/main/java/org/apache/hadoop/hbase/thrift/generated/Hbase.java
+index f77ce14..a0d923e 100644
+--- a/hbase-thrift/src/main/java/org/apache/hadoop/hbase/thrift/generated/Hbase.java
++++ b/hbase-thrift/src/main/java/org/apache/hadoop/hbase/thrift/generated/Hbase.java
+@@ -34,7 +34,7 @@ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+ 
+ @SuppressWarnings({"cast", "rawtypes", "serial", "unchecked"})
+-@Generated(value = "Autogenerated by Thrift Compiler (0.9.3)", date = "2016-05-25")
++@Generated(value = "Autogenerated by Thrift Compiler (0.9.3)", date = "2017-02-08")
+ public class Hbase {
+ 
+   public interface Iface {
+@@ -197,9 +197,11 @@ public class Hbase {
+      * 
+      * @param columns List of columns to return, null for all columns
+      * 
++     * @param numVersions number of versions to retrieve
++     * 
+      * @param attributes Get attributes
+      */
+-    public List<TRowResult> getRowWithColumns(ByteBuffer tableName, ByteBuffer row, List<ByteBuffer> columns, Map<ByteBuffer,ByteBuffer> attributes) throws IOError, org.apache.thrift.TException;
++    public List<TRowResult> getRowWithColumns(ByteBuffer tableName, ByteBuffer row, List<ByteBuffer> columns, int numVersions, Map<ByteBuffer,ByteBuffer> attributes) throws IOError, org.apache.thrift.TException;
+ 
+     /**
+      * Get all the data for the specified table and row at the specified
+@@ -260,9 +262,11 @@ public class Hbase {
+      * 
+      * @param columns List of columns to return, null for all columns
+      * 
++     * @param numVersions number of versions to retrieve
++     * 
+      * @param attributes Get attributes
+      */
+-    public List<TRowResult> getRowsWithColumns(ByteBuffer tableName, List<ByteBuffer> rows, List<ByteBuffer> columns, Map<ByteBuffer,ByteBuffer> attributes) throws IOError, org.apache.thrift.TException;
++    public List<TRowResult> getRowsWithColumns(ByteBuffer tableName, List<ByteBuffer> rows, List<ByteBuffer> columns, int numVersions, Map<ByteBuffer,ByteBuffer> attributes) throws IOError, org.apache.thrift.TException;
+ 
+     /**
+      * Get all the data for the specified table and rows at the specified
+@@ -674,7 +678,7 @@ public class Hbase {
+ 
+     public void getRow(ByteBuffer tableName, ByteBuffer row, Map<ByteBuffer,ByteBuffer> attributes, org.apache.thrift.async.AsyncMethodCallback resultHandler) throws org.apache.thrift.TException;
+ 
+-    public void getRowWithColumns(ByteBuffer tableName, ByteBuffer row, List<ByteBuffer> columns, Map<ByteBuffer,ByteBuffer> attributes, org.apache.thrift.async.AsyncMethodCallback resultHandler) throws org.apache.thrift.TException;
++    public void getRowWithColumns(ByteBuffer tableName, ByteBuffer row, List<ByteBuffer> columns, int numVersions, Map<ByteBuffer,ByteBuffer> attributes, org.apache.thrift.async.AsyncMethodCallback resultHandler) throws org.apache.thrift.TException;
+ 
+     public void getRowTs(ByteBuffer tableName, ByteBuffer row, long timestamp, Map<ByteBuffer,ByteBuffer> attributes, org.apache.thrift.async.AsyncMethodCallback resultHandler) throws org.apache.thrift.TException;
+ 
+@@ -682,7 +686,7 @@ public class Hbase {
+ 
+     public void getRows(ByteBuffer tableName, List<ByteBuffer> rows, Map<ByteBuffer,ByteBuffer> attributes, org.apache.thrift.async.AsyncMethodCallback resultHandler) throws org.apache.thrift.TException;
+ 
+-    public void getRowsWithColumns(ByteBuffer tableName, List<ByteBuffer> rows, List<ByteBuffer> columns, Map<ByteBuffer,ByteBuffer> attributes, org.apache.thrift.async.AsyncMethodCallback resultHandler) throws org.apache.thrift.TException;
++    public void getRowsWithColumns(ByteBuffer tableName, List<ByteBuffer> rows, List<ByteBuffer> columns, int numVersions, Map<ByteBuffer,ByteBuffer> attributes, org.apache.thrift.async.AsyncMethodCallback resultHandler) throws org.apache.thrift.TException;
+ 
+     public void getRowsTs(ByteBuffer tableName, List<ByteBuffer> rows, long timestamp, Map<ByteBuffer,ByteBuffer> attributes, org.apache.thrift.async.AsyncMethodCallback resultHandler) throws org.apache.thrift.TException;
+ 
+@@ -1122,18 +1126,19 @@ public class Hbase {
+       throw new org.apache.thrift.TApplicationException(org.apache.thrift.TApplicationException.MISSING_RESULT, "getRow failed: unknown result");
+     }
+ 
+-    public List<TRowResult> getRowWithColumns(ByteBuffer tableName, ByteBuffer row, List<ByteBuffer> columns, Map<ByteBuffer,ByteBuffer> attributes) throws IOError, org.apache.thrift.TException
++    public List<TRowResult> getRowWithColumns(ByteBuffer tableName, ByteBuffer row, List<ByteBuffer> columns, int numVersions, Map<ByteBuffer,ByteBuffer> attributes) throws IOError, org.apache.thrift.TException
+     {
+-      send_getRowWithColumns(tableName, row, columns, attributes);
++      send_getRowWithColumns(tableName, row, columns, numVersions, attributes);
+       return recv_getRowWithColumns();
+     }
+ 
+-    public void send_getRowWithColumns(ByteBuffer tableName, ByteBuffer row, List<ByteBuffer> columns, Map<ByteBuffer,ByteBuffer> attributes) throws org.apache.thrift.TException
++    public void send_getRowWithColumns(ByteBuffer tableName, ByteBuffer row, List<ByteBuffer> columns, int numVersions, Map<ByteBuffer,ByteBuffer> attributes) throws org.apache.thrift.TException
+     {
+       getRowWithColumns_args args = new getRowWithColumns_args();
+       args.setTableName(tableName);
+       args.setRow(row);
+       args.setColumns(columns);
++      args.setNumVersions(numVersions);
+       args.setAttributes(attributes);
+       sendBase("getRowWithColumns", args);
+     }
+@@ -1238,18 +1243,19 @@ public class Hbase {
+       throw new org.apache.thrift.TApplicationException(org.apache.thrift.TApplicationException.MISSING_RESULT, "getRows failed: unknown result");
+     }
+ 
+-    public List<TRowResult> getRowsWithColumns(ByteBuffer tableName, List<ByteBuffer> rows, List<ByteBuffer> columns, Map<ByteBuffer,ByteBuffer> attributes) throws IOError, org.apache.thrift.TException
++    public List<TRowResult> getRowsWithColumns(ByteBuffer tableName, List<ByteBuffer> rows, List<ByteBuffer> columns, int numVersions, Map<ByteBuffer,ByteBuffer> attributes) throws IOError, org.apache.thrift.TException
+     {
+-      send_getRowsWithColumns(tableName, rows, columns, attributes);
++      send_getRowsWithColumns(tableName, rows, columns, numVersions, attributes);
+       return recv_getRowsWithColumns();
+     }
+ 
+-    public void send_getRowsWithColumns(ByteBuffer tableName, List<ByteBuffer> rows, List<ByteBuffer> columns, Map<ByteBuffer,ByteBuffer> attributes) throws org.apache.thrift.TException
++    public void send_getRowsWithColumns(ByteBuffer tableName, List<ByteBuffer> rows, List<ByteBuffer> columns, int numVersions, Map<ByteBuffer,ByteBuffer> attributes) throws org.apache.thrift.TException
+     {
+       getRowsWithColumns_args args = new getRowsWithColumns_args();
+       args.setTableName(tableName);
+       args.setRows(rows);
+       args.setColumns(columns);
++      args.setNumVersions(numVersions);
+       args.setAttributes(attributes);
+       sendBase("getRowsWithColumns", args);
+     }
+@@ -2480,9 +2486,9 @@ public class Hbase {
+       }
+     }
+ 
+-    public void getRowWithColumns(ByteBuffer tableName, ByteBuffer row, List<ByteBuffer> columns, Map<ByteBuffer,ByteBuffer> attributes, org.apache.thrift.async.AsyncMethodCallback resultHandler) throws org.apache.thrift.TException {
++    public void getRowWithColumns(ByteBuffer tableName, ByteBuffer row, List<ByteBuffer> columns, int numVersions, Map<ByteBuffer,ByteBuffer> attributes, org.apache.thrift.async.AsyncMethodCallback resultHandler) throws org.apache.thrift.TException {
+       checkReady();
+-      getRowWithColumns_call method_call = new getRowWithColumns_call(tableName, row, columns, attributes, resultHandler, this, ___protocolFactory, ___transport);
++      getRowWithColumns_call method_call = new getRowWithColumns_call(tableName, row, columns, numVersions, attributes, resultHandler, this, ___protocolFactory, ___transport);
+       this.___currentMethod = method_call;
+       ___manager.call(method_call);
+     }
+@@ -2491,12 +2497,14 @@ public class Hbase {
+       private ByteBuffer tableName;
+       private ByteBuffer row;
+       private List<ByteBuffer> columns;
++      private int numVersions;
+       private Map<ByteBuffer,ByteBuffer> attributes;
+-      public getRowWithColumns_call(ByteBuffer tableName, ByteBuffer row, List<ByteBuffer> columns, Map<ByteBuffer,ByteBuffer> attributes, org.apache.thrift.async.AsyncMethodCallback resultHandler, org.apache.thrift.async.TAsyncClient client, org.apache.thrift.protocol.TProtocolFactory protocolFactory, org.apache.thrift.transport.TNonblockingTransport transport) throws org.apache.thrift.TException {
++      public getRowWithColumns_call(ByteBuffer tableName, ByteBuffer row, List<ByteBuffer> columns, int numVersions, Map<ByteBuffer,ByteBuffer> attributes, org.apache.thrift.async.AsyncMethodCallback resultHandler, org.apache.thrift.async.TAsyncClient client, org.apache.thrift.protocol.TProtocolFactory protocolFactory, org.apache.thrift.transport.TNonblockingTransport transport) throws org.apache.thrift.TException {
+         super(client, protocolFactory, transport, resultHandler, false);
+         this.tableName = tableName;
+         this.row = row;
+         this.columns = columns;
++        this.numVersions = numVersions;
+         this.attributes = attributes;
+       }
+ 
+@@ -2506,6 +2514,7 @@ public class Hbase {
+         args.setTableName(tableName);
+         args.setRow(row);
+         args.setColumns(columns);
++        args.setNumVersions(numVersions);
+         args.setAttributes(attributes);
+         args.write(prot);
+         prot.writeMessageEnd();
+@@ -2644,9 +2653,9 @@ public class Hbase {
+       }
+     }
+ 
+-    public void getRowsWithColumns(ByteBuffer tableName, List<ByteBuffer> rows, List<ByteBuffer> columns, Map<ByteBuffer,ByteBuffer> attributes, org.apache.thrift.async.AsyncMethodCallback resultHandler) throws org.apache.thrift.TException {
++    public void getRowsWithColumns(ByteBuffer tableName, List<ByteBuffer> rows, List<ByteBuffer> columns, int numVersions, Map<ByteBuffer,ByteBuffer> attributes, org.apache.thrift.async.AsyncMethodCallback resultHandler) throws org.apache.thrift.TException {
+       checkReady();
+-      getRowsWithColumns_call method_call = new getRowsWithColumns_call(tableName, rows, columns, attributes, resultHandler, this, ___protocolFactory, ___transport);
++      getRowsWithColumns_call method_call = new getRowsWithColumns_call(tableName, rows, columns, numVersions, attributes, resultHandler, this, ___protocolFactory, ___transport);
+       this.___currentMethod = method_call;
+       ___manager.call(method_call);
+     }
+@@ -2655,12 +2664,14 @@ public class Hbase {
+       private ByteBuffer tableName;
+       private List<ByteBuffer> rows;
+       private List<ByteBuffer> columns;
++      private int numVersions;
+       private Map<ByteBuffer,ByteBuffer> attributes;
+-      public getRowsWithColumns_call(ByteBuffer tableName, List<ByteBuffer> rows, List<ByteBuffer> columns, Map<ByteBuffer,ByteBuffer> attributes, org.apache.thrift.async.AsyncMethodCallback resultHandler, org.apache.thrift.async.TAsyncClient client, org.apache.thrift.protocol.TProtocolFactory protocolFactory, org.apache.thrift.transport.TNonblockingTransport transport) throws org.apache.thrift.TException {
++      public getRowsWithColumns_call(ByteBuffer tableName, List<ByteBuffer> rows, List<ByteBuffer> columns, int numVersions, Map<ByteBuffer,ByteBuffer> attributes, org.apache.thrift.async.AsyncMethodCallback resultHandler, org.apache.thrift.async.TAsyncClient client, org.apache.thrift.protocol.TProtocolFactory protocolFactory, org.apache.thrift.transport.TNonblockingTransport transport) throws org.apache.thrift.TException {
+         super(client, protocolFactory, transport, resultHandler, false);
+         this.tableName = tableName;
+         this.rows = rows;
+         this.columns = columns;
++        this.numVersions = numVersions;
+         this.attributes = attributes;
+       }
+ 
+@@ -2670,6 +2681,7 @@ public class Hbase {
+         args.setTableName(tableName);
+         args.setRows(rows);
+         args.setColumns(columns);
++        args.setNumVersions(numVersions);
+         args.setAttributes(attributes);
+         args.write(prot);
+         prot.writeMessageEnd();
+@@ -4085,7 +4097,7 @@ public class Hbase {
+       public getRowWithColumns_result getResult(I iface, getRowWithColumns_args args) throws org.apache.thrift.TException {
+         getRowWithColumns_result result = new getRowWithColumns_result();
+         try {
+-          result.success = iface.getRowWithColumns(args.tableName, args.row, args.columns, args.attributes);
++          result.success = iface.getRowWithColumns(args.tableName, args.row, args.columns, args.numVersions, args.attributes);
+         } catch (IOError io) {
+           result.io = io;
+         }
+@@ -4181,7 +4193,7 @@ public class Hbase {
+       public getRowsWithColumns_result getResult(I iface, getRowsWithColumns_args args) throws org.apache.thrift.TException {
+         getRowsWithColumns_result result = new getRowsWithColumns_result();
+         try {
+-          result.success = iface.getRowsWithColumns(args.tableName, args.rows, args.columns, args.attributes);
++          result.success = iface.getRowsWithColumns(args.tableName, args.rows, args.columns, args.numVersions, args.attributes);
+         } catch (IOError io) {
+           result.io = io;
+         }
+@@ -5731,7 +5743,7 @@ public class Hbase {
+       }
+ 
+       public void start(I iface, getRowWithColumns_args args, org.apache.thrift.async.AsyncMethodCallback<List<TRowResult>> resultHandler) throws TException {
+-        iface.getRowWithColumns(args.tableName, args.row, args.columns, args.attributes,resultHandler);
++        iface.getRowWithColumns(args.tableName, args.row, args.columns, args.numVersions, args.attributes,resultHandler);
+       }
+     }
+ 
+@@ -5959,7 +5971,7 @@ public class Hbase {
+       }
+ 
+       public void start(I iface, getRowsWithColumns_args args, org.apache.thrift.async.AsyncMethodCallback<List<TRowResult>> resultHandler) throws TException {
+-        iface.getRowsWithColumns(args.tableName, args.rows, args.columns, args.attributes,resultHandler);
++        iface.getRowsWithColumns(args.tableName, args.rows, args.columns, args.numVersions, args.attributes,resultHandler);
+       }
+     }
+ 
+@@ -21285,7 +21297,8 @@ public class Hbase {
+     private static final org.apache.thrift.protocol.TField TABLE_NAME_FIELD_DESC = new org.apache.thrift.protocol.TField("tableName", org.apache.thrift.protocol.TType.STRING, (short)1);
+     private static final org.apache.thrift.protocol.TField ROW_FIELD_DESC = new org.apache.thrift.protocol.TField("row", org.apache.thrift.protocol.TType.STRING, (short)2);
+     private static final org.apache.thrift.protocol.TField COLUMNS_FIELD_DESC = new org.apache.thrift.protocol.TField("columns", org.apache.thrift.protocol.TType.LIST, (short)3);
+-    private static final org.apache.thrift.protocol.TField ATTRIBUTES_FIELD_DESC = new org.apache.thrift.protocol.TField("attributes", org.apache.thrift.protocol.TType.MAP, (short)4);
++    private static final org.apache.thrift.protocol.TField NUM_VERSIONS_FIELD_DESC = new org.apache.thrift.protocol.TField("numVersions", org.apache.thrift.protocol.TType.I32, (short)4);
++    private static final org.apache.thrift.protocol.TField ATTRIBUTES_FIELD_DESC = new org.apache.thrift.protocol.TField("attributes", org.apache.thrift.protocol.TType.MAP, (short)5);
+ 
+     private static final Map<Class<? extends IScheme>, SchemeFactory> schemes = new HashMap<Class<? extends IScheme>, SchemeFactory>();
+     static {
+@@ -21306,6 +21319,10 @@ public class Hbase {
+      */
+     public List<ByteBuffer> columns; // required
+     /**
++     * number of versions to retrieve
++     */
++    public int numVersions; // required
++    /**
+      * Get attributes
+      */
+     public Map<ByteBuffer,ByteBuffer> attributes; // required
+@@ -21325,9 +21342,13 @@ public class Hbase {
+        */
+       COLUMNS((short)3, "columns"),
+       /**
++       * number of versions to retrieve
++       */
++      NUM_VERSIONS((short)4, "numVersions"),
++      /**
+        * Get attributes
+        */
+-      ATTRIBUTES((short)4, "attributes");
++      ATTRIBUTES((short)5, "attributes");
+ 
+       private static final Map<String, _Fields> byName = new HashMap<String, _Fields>();
+ 
+@@ -21348,7 +21369,9 @@ public class Hbase {
+             return ROW;
+           case 3: // COLUMNS
+             return COLUMNS;
+-          case 4: // ATTRIBUTES
++          case 4: // NUM_VERSIONS
++            return NUM_VERSIONS;
++          case 5: // ATTRIBUTES
+             return ATTRIBUTES;
+           default:
+             return null;
+@@ -21390,6 +21413,8 @@ public class Hbase {
+     }
+ 
+     // isset id assignments
++    private static final int __NUMVERSIONS_ISSET_ID = 0;
++    private byte __isset_bitfield = 0;
+     public static final Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> metaDataMap;
+     static {
+       Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> tmpMap = new EnumMap<_Fields, org.apache.thrift.meta_data.FieldMetaData>(_Fields.class);
+@@ -21400,6 +21425,8 @@ public class Hbase {
+       tmpMap.put(_Fields.COLUMNS, new org.apache.thrift.meta_data.FieldMetaData("columns", org.apache.thrift.TFieldRequirementType.DEFAULT, 
+           new org.apache.thrift.meta_data.ListMetaData(org.apache.thrift.protocol.TType.LIST, 
+               new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRING              , "Text"))));
++      tmpMap.put(_Fields.NUM_VERSIONS, new org.apache.thrift.meta_data.FieldMetaData("numVersions", org.apache.thrift.TFieldRequirementType.DEFAULT, 
++          new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.I32)));
+       tmpMap.put(_Fields.ATTRIBUTES, new org.apache.thrift.meta_data.FieldMetaData("attributes", org.apache.thrift.TFieldRequirementType.DEFAULT, 
+           new org.apache.thrift.meta_data.MapMetaData(org.apache.thrift.protocol.TType.MAP, 
+               new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRING              , "Text"), 
+@@ -21415,12 +21442,15 @@ public class Hbase {
+       ByteBuffer tableName,
+       ByteBuffer row,
+       List<ByteBuffer> columns,
++      int numVersions,
+       Map<ByteBuffer,ByteBuffer> attributes)
+     {
+       this();
+       this.tableName = org.apache.thrift.TBaseHelper.copyBinary(tableName);
+       this.row = org.apache.thrift.TBaseHelper.copyBinary(row);
+       this.columns = columns;
++      this.numVersions = numVersions;
++      setNumVersionsIsSet(true);
+       this.attributes = attributes;
+     }
+ 
+@@ -21428,6 +21458,7 @@ public class Hbase {
+      * Performs a deep copy on <i>other</i>.
+      */
+     public getRowWithColumns_args(getRowWithColumns_args other) {
++      __isset_bitfield = other.__isset_bitfield;
+       if (other.isSetTableName()) {
+         this.tableName = other.tableName;
+       }
+@@ -21441,6 +21472,7 @@ public class Hbase {
+         }
+         this.columns = __this__columns;
+       }
++      this.numVersions = other.numVersions;
+       if (other.isSetAttributes()) {
+         Map<ByteBuffer,ByteBuffer> __this__attributes = new HashMap<ByteBuffer,ByteBuffer>(other.attributes.size());
+         for (Map.Entry<ByteBuffer, ByteBuffer> other_element : other.attributes.entrySet()) {
+@@ -21467,6 +21499,8 @@ public class Hbase {
+       this.tableName = null;
+       this.row = null;
+       this.columns = null;
++      setNumVersionsIsSet(false);
++      this.numVersions = 0;
+       this.attributes = null;
+     }
+ 
+@@ -21595,6 +21629,35 @@ public class Hbase {
+       }
+     }
+ 
++    /**
++     * number of versions to retrieve
++     */
++    public int getNumVersions() {
++      return this.numVersions;
++    }
++
++    /**
++     * number of versions to retrieve
++     */
++    public getRowWithColumns_args setNumVersions(int numVersions) {
++      this.numVersions = numVersions;
++      setNumVersionsIsSet(true);
++      return this;
++    }
++
++    public void unsetNumVersions() {
++      __isset_bitfield = EncodingUtils.clearBit(__isset_bitfield, __NUMVERSIONS_ISSET_ID);
++    }
++
++    /** Returns true if field numVersions is set (has been assigned a value) and false otherwise */
++    public boolean isSetNumVersions() {
++      return EncodingUtils.testBit(__isset_bitfield, __NUMVERSIONS_ISSET_ID);
++    }
++
++    public void setNumVersionsIsSet(boolean value) {
++      __isset_bitfield = EncodingUtils.setBit(__isset_bitfield, __NUMVERSIONS_ISSET_ID, value);
++    }
++
+     public int getAttributesSize() {
+       return (this.attributes == null) ? 0 : this.attributes.size();
+     }
+@@ -21662,6 +21725,14 @@ public class Hbase {
+         }
+         break;
+ 
++      case NUM_VERSIONS:
++        if (value == null) {
++          unsetNumVersions();
++        } else {
++          setNumVersions((Integer)value);
++        }
++        break;
++
+       case ATTRIBUTES:
+         if (value == null) {
+           unsetAttributes();
+@@ -21684,6 +21755,9 @@ public class Hbase {
+       case COLUMNS:
+         return getColumns();
+ 
++      case NUM_VERSIONS:
++        return getNumVersions();
++
+       case ATTRIBUTES:
+         return getAttributes();
+ 
+@@ -21704,6 +21778,8 @@ public class Hbase {
+         return isSetRow();
+       case COLUMNS:
+         return isSetColumns();
++      case NUM_VERSIONS:
++        return isSetNumVersions();
+       case ATTRIBUTES:
+         return isSetAttributes();
+       }
+@@ -21750,6 +21826,15 @@ public class Hbase {
+           return false;
+       }
+ 
++      boolean this_present_numVersions = true;
++      boolean that_present_numVersions = true;
++      if (this_present_numVersions || that_present_numVersions) {
++        if (!(this_present_numVersions && that_present_numVersions))
++          return false;
++        if (this.numVersions != that.numVersions)
++          return false;
++      }
++
+       boolean this_present_attributes = true && this.isSetAttributes();
+       boolean that_present_attributes = true && that.isSetAttributes();
+       if (this_present_attributes || that_present_attributes) {
+@@ -21781,6 +21866,11 @@ public class Hbase {
+       if (present_columns)
+         list.add(columns);
+ 
++      boolean present_numVersions = true;
++      list.add(present_numVersions);
++      if (present_numVersions)
++        list.add(numVersions);
++
+       boolean present_attributes = true && (isSetAttributes());
+       list.add(present_attributes);
+       if (present_attributes)
+@@ -21827,6 +21917,16 @@ public class Hbase {
+           return lastComparison;
+         }
+       }
++      lastComparison = Boolean.valueOf(isSetNumVersions()).compareTo(other.isSetNumVersions());
++      if (lastComparison != 0) {
++        return lastComparison;
++      }
++      if (isSetNumVersions()) {
++        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.numVersions, other.numVersions);
++        if (lastComparison != 0) {
++          return lastComparison;
++        }
++      }
+       lastComparison = Boolean.valueOf(isSetAttributes()).compareTo(other.isSetAttributes());
+       if (lastComparison != 0) {
+         return lastComparison;
+@@ -21881,6 +21981,10 @@ public class Hbase {
+       }
+       first = false;
+       if (!first) sb.append(", ");
++      sb.append("numVersions:");
++      sb.append(this.numVersions);
++      first = false;
++      if (!first) sb.append(", ");
+       sb.append("attributes:");
+       if (this.attributes == null) {
+         sb.append("null");
+@@ -21907,6 +22011,8 @@ public class Hbase {
+ 
+     private void readObject(java.io.ObjectInputStream in) throws java.io.IOException, ClassNotFoundException {
+       try {
++        // it doesn't seem like you should have to do this, but java serialization is wacky, and doesn't call the default constructor.
++        __isset_bitfield = 0;
+         read(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(in)));
+       } catch (org.apache.thrift.TException te) {
+         throw new java.io.IOException(te);
+@@ -21965,7 +22071,15 @@ public class Hbase {
+                 org.apache.thrift.protocol.TProtocolUtil.skip(iprot, schemeField.type);
+               }
+               break;
+-            case 4: // ATTRIBUTES
++            case 4: // NUM_VERSIONS
++              if (schemeField.type == org.apache.thrift.protocol.TType.I32) {
++                struct.numVersions = iprot.readI32();
++                struct.setNumVersionsIsSet(true);
++              } else { 
++                org.apache.thrift.protocol.TProtocolUtil.skip(iprot, schemeField.type);
++              }
++              break;
++            case 5: // ATTRIBUTES
+               if (schemeField.type == org.apache.thrift.protocol.TType.MAP) {
+                 {
+                   org.apache.thrift.protocol.TMap _map159 = iprot.readMapBegin();
+@@ -22022,6 +22136,9 @@ public class Hbase {
+           }
+           oprot.writeFieldEnd();
+         }
++        oprot.writeFieldBegin(NUM_VERSIONS_FIELD_DESC);
++        oprot.writeI32(struct.numVersions);
++        oprot.writeFieldEnd();
+         if (struct.attributes != null) {
+           oprot.writeFieldBegin(ATTRIBUTES_FIELD_DESC);
+           {
+@@ -22062,10 +22179,13 @@ public class Hbase {
+         if (struct.isSetColumns()) {
+           optionals.set(2);
+         }
+-        if (struct.isSetAttributes()) {
++        if (struct.isSetNumVersions()) {
+           optionals.set(3);
+         }
+-        oprot.writeBitSet(optionals, 4);
++        if (struct.isSetAttributes()) {
++          optionals.set(4);
++        }
++        oprot.writeBitSet(optionals, 5);
+         if (struct.isSetTableName()) {
+           oprot.writeBinary(struct.tableName);
+         }
+@@ -22081,6 +22201,9 @@ public class Hbase {
+             }
+           }
+         }
++        if (struct.isSetNumVersions()) {
++          oprot.writeI32(struct.numVersions);
++        }
+         if (struct.isSetAttributes()) {
+           {
+             oprot.writeI32(struct.attributes.size());
+@@ -22096,7 +22219,7 @@ public class Hbase {
+       @Override
+       public void read(org.apache.thrift.protocol.TProtocol prot, getRowWithColumns_args struct) throws org.apache.thrift.TException {
+         TTupleProtocol iprot = (TTupleProtocol) prot;
+-        BitSet incoming = iprot.readBitSet(4);
++        BitSet incoming = iprot.readBitSet(5);
+         if (incoming.get(0)) {
+           struct.tableName = iprot.readBinary();
+           struct.setTableNameIsSet(true);
+@@ -22119,6 +22242,10 @@ public class Hbase {
+           struct.setColumnsIsSet(true);
+         }
+         if (incoming.get(3)) {
++          struct.numVersions = iprot.readI32();
++          struct.setNumVersionsIsSet(true);
++        }
++        if (incoming.get(4)) {
+           {
+             org.apache.thrift.protocol.TMap _map170 = new org.apache.thrift.protocol.TMap(org.apache.thrift.protocol.TType.STRING, org.apache.thrift.protocol.TType.STRING, iprot.readI32());
+             struct.attributes = new HashMap<ByteBuffer,ByteBuffer>(2*_map170.size);
+@@ -26731,7 +26858,8 @@ public class Hbase {
+     private static final org.apache.thrift.protocol.TField TABLE_NAME_FIELD_DESC = new org.apache.thrift.protocol.TField("tableName", org.apache.thrift.protocol.TType.STRING, (short)1);
+     private static final org.apache.thrift.protocol.TField ROWS_FIELD_DESC = new org.apache.thrift.protocol.TField("rows", org.apache.thrift.protocol.TType.LIST, (short)2);
+     private static final org.apache.thrift.protocol.TField COLUMNS_FIELD_DESC = new org.apache.thrift.protocol.TField("columns", org.apache.thrift.protocol.TType.LIST, (short)3);
+-    private static final org.apache.thrift.protocol.TField ATTRIBUTES_FIELD_DESC = new org.apache.thrift.protocol.TField("attributes", org.apache.thrift.protocol.TType.MAP, (short)4);
++    private static final org.apache.thrift.protocol.TField NUM_VERSIONS_FIELD_DESC = new org.apache.thrift.protocol.TField("numVersions", org.apache.thrift.protocol.TType.I32, (short)4);
++    private static final org.apache.thrift.protocol.TField ATTRIBUTES_FIELD_DESC = new org.apache.thrift.protocol.TField("attributes", org.apache.thrift.protocol.TType.MAP, (short)5);
+ 
+     private static final Map<Class<? extends IScheme>, SchemeFactory> schemes = new HashMap<Class<? extends IScheme>, SchemeFactory>();
+     static {
+@@ -26752,6 +26880,10 @@ public class Hbase {
+      */
+     public List<ByteBuffer> columns; // required
+     /**
++     * number of versions to retrieve
++     */
++    public int numVersions; // required
++    /**
+      * Get attributes
+      */
+     public Map<ByteBuffer,ByteBuffer> attributes; // required
+@@ -26771,9 +26903,13 @@ public class Hbase {
+        */
+       COLUMNS((short)3, "columns"),
+       /**
++       * number of versions to retrieve
++       */
++      NUM_VERSIONS((short)4, "numVersions"),
++      /**
+        * Get attributes
+        */
+-      ATTRIBUTES((short)4, "attributes");
++      ATTRIBUTES((short)5, "attributes");
+ 
+       private static final Map<String, _Fields> byName = new HashMap<String, _Fields>();
+ 
+@@ -26794,7 +26930,9 @@ public class Hbase {
+             return ROWS;
+           case 3: // COLUMNS
+             return COLUMNS;
+-          case 4: // ATTRIBUTES
++          case 4: // NUM_VERSIONS
++            return NUM_VERSIONS;
++          case 5: // ATTRIBUTES
+             return ATTRIBUTES;
+           default:
+             return null;
+@@ -26836,6 +26974,8 @@ public class Hbase {
+     }
+ 
+     // isset id assignments
++    private static final int __NUMVERSIONS_ISSET_ID = 0;
++    private byte __isset_bitfield = 0;
+     public static final Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> metaDataMap;
+     static {
+       Map<_Fields, org.apache.thrift.meta_data.FieldMetaData> tmpMap = new EnumMap<_Fields, org.apache.thrift.meta_data.FieldMetaData>(_Fields.class);
+@@ -26847,6 +26987,8 @@ public class Hbase {
+       tmpMap.put(_Fields.COLUMNS, new org.apache.thrift.meta_data.FieldMetaData("columns", org.apache.thrift.TFieldRequirementType.DEFAULT, 
+           new org.apache.thrift.meta_data.ListMetaData(org.apache.thrift.protocol.TType.LIST, 
+               new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRING              , "Text"))));
++      tmpMap.put(_Fields.NUM_VERSIONS, new org.apache.thrift.meta_data.FieldMetaData("numVersions", org.apache.thrift.TFieldRequirementType.DEFAULT, 
++          new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.I32)));
+       tmpMap.put(_Fields.ATTRIBUTES, new org.apache.thrift.meta_data.FieldMetaData("attributes", org.apache.thrift.TFieldRequirementType.DEFAULT, 
+           new org.apache.thrift.meta_data.MapMetaData(org.apache.thrift.protocol.TType.MAP, 
+               new org.apache.thrift.meta_data.FieldValueMetaData(org.apache.thrift.protocol.TType.STRING              , "Text"), 
+@@ -26862,12 +27004,15 @@ public class Hbase {
+       ByteBuffer tableName,
+       List<ByteBuffer> rows,
+       List<ByteBuffer> columns,
++      int numVersions,
+       Map<ByteBuffer,ByteBuffer> attributes)
+     {
+       this();
+       this.tableName = org.apache.thrift.TBaseHelper.copyBinary(tableName);
+       this.rows = rows;
+       this.columns = columns;
++      this.numVersions = numVersions;
++      setNumVersionsIsSet(true);
+       this.attributes = attributes;
+     }
+ 
+@@ -26875,6 +27020,7 @@ public class Hbase {
+      * Performs a deep copy on <i>other</i>.
+      */
+     public getRowsWithColumns_args(getRowsWithColumns_args other) {
++      __isset_bitfield = other.__isset_bitfield;
+       if (other.isSetTableName()) {
+         this.tableName = other.tableName;
+       }
+@@ -26892,6 +27038,7 @@ public class Hbase {
+         }
+         this.columns = __this__columns;
+       }
++      this.numVersions = other.numVersions;
+       if (other.isSetAttributes()) {
+         Map<ByteBuffer,ByteBuffer> __this__attributes = new HashMap<ByteBuffer,ByteBuffer>(other.attributes.size());
+         for (Map.Entry<ByteBuffer, ByteBuffer> other_element : other.attributes.entrySet()) {
+@@ -26918,6 +27065,8 @@ public class Hbase {
+       this.tableName = null;
+       this.rows = null;
+       this.columns = null;
++      setNumVersionsIsSet(false);
++      this.numVersions = 0;
+       this.attributes = null;
+     }
+ 
+@@ -27051,6 +27200,35 @@ public class Hbase {
+       }
+     }
+ 
++    /**
++     * number of versions to retrieve
++     */
++    public int getNumVersions() {
++      return this.numVersions;
++    }
++
++    /**
++     * number of versions to retrieve
++     */
++    public getRowsWithColumns_args setNumVersions(int numVersions) {
++      this.numVersions = numVersions;
++      setNumVersionsIsSet(true);
++      return this;
++    }
++
++    public void unsetNumVersions() {
++      __isset_bitfield = EncodingUtils.clearBit(__isset_bitfield, __NUMVERSIONS_ISSET_ID);
++    }
++
++    /** Returns true if field numVersions is set (has been assigned a value) and false otherwise */
++    public boolean isSetNumVersions() {
++      return EncodingUtils.testBit(__isset_bitfield, __NUMVERSIONS_ISSET_ID);
++    }
++
++    public void setNumVersionsIsSet(boolean value) {
++      __isset_bitfield = EncodingUtils.setBit(__isset_bitfield, __NUMVERSIONS_ISSET_ID, value);
++    }
++
+     public int getAttributesSize() {
+       return (this.attributes == null) ? 0 : this.attributes.size();
+     }
+@@ -27118,6 +27296,14 @@ public class Hbase {
+         }
+         break;
+ 
++      case NUM_VERSIONS:
++        if (value == null) {
++          unsetNumVersions();
++        } else {
++          setNumVersions((Integer)value);
++        }
++        break;
++
+       case ATTRIBUTES:
+         if (value == null) {
+           unsetAttributes();
+@@ -27140,6 +27326,9 @@ public class Hbase {
+       case COLUMNS:
+         return getColumns();
+ 
++      case NUM_VERSIONS:
++        return getNumVersions();
++
+       case ATTRIBUTES:
+         return getAttributes();
+ 
+@@ -27160,6 +27349,8 @@ public class Hbase {
+         return isSetRows();
+       case COLUMNS:
+         return isSetColumns();
++      case NUM_VERSIONS:
++        return isSetNumVersions();
+       case ATTRIBUTES:
+         return isSetAttributes();
+       }
+@@ -27206,6 +27397,15 @@ public class Hbase {
+           return false;
+       }
+ 
++      boolean this_present_numVersions = true;
++      boolean that_present_numVersions = true;
++      if (this_present_numVersions || that_present_numVersions) {
++        if (!(this_present_numVersions && that_present_numVersions))
++          return false;
++        if (this.numVersions != that.numVersions)
++          return false;
++      }
++
+       boolean this_present_attributes = true && this.isSetAttributes();
+       boolean that_present_attributes = true && that.isSetAttributes();
+       if (this_present_attributes || that_present_attributes) {
+@@ -27237,6 +27437,11 @@ public class Hbase {
+       if (present_columns)
+         list.add(columns);
+ 
++      boolean present_numVersions = true;
++      list.add(present_numVersions);
++      if (present_numVersions)
++        list.add(numVersions);
++
+       boolean present_attributes = true && (isSetAttributes());
+       list.add(present_attributes);
+       if (present_attributes)
+@@ -27283,6 +27488,16 @@ public class Hbase {
+           return lastComparison;
+         }
+       }
++      lastComparison = Boolean.valueOf(isSetNumVersions()).compareTo(other.isSetNumVersions());
++      if (lastComparison != 0) {
++        return lastComparison;
++      }
++      if (isSetNumVersions()) {
++        lastComparison = org.apache.thrift.TBaseHelper.compareTo(this.numVersions, other.numVersions);
++        if (lastComparison != 0) {
++          return lastComparison;
++        }
++      }
+       lastComparison = Boolean.valueOf(isSetAttributes()).compareTo(other.isSetAttributes());
+       if (lastComparison != 0) {
+         return lastComparison;
+@@ -27337,6 +27552,10 @@ public class Hbase {
+       }
+       first = false;
+       if (!first) sb.append(", ");
++      sb.append("numVersions:");
++      sb.append(this.numVersions);
++      first = false;
++      if (!first) sb.append(", ");
+       sb.append("attributes:");
+       if (this.attributes == null) {
+         sb.append("null");
+@@ -27363,6 +27582,8 @@ public class Hbase {
+ 
+     private void readObject(java.io.ObjectInputStream in) throws java.io.IOException, ClassNotFoundException {
+       try {
++        // it doesn't seem like you should have to do this, but java serialization is wacky, and doesn't call the default constructor.
++        __isset_bitfield = 0;
+         read(new org.apache.thrift.protocol.TCompactProtocol(new org.apache.thrift.transport.TIOStreamTransport(in)));
+       } catch (org.apache.thrift.TException te) {
+         throw new java.io.IOException(te);
+@@ -27431,7 +27652,15 @@ public class Hbase {
+                 org.apache.thrift.protocol.TProtocolUtil.skip(iprot, schemeField.type);
+               }
+               break;
+-            case 4: // ATTRIBUTES
++            case 4: // NUM_VERSIONS
++              if (schemeField.type == org.apache.thrift.protocol.TType.I32) {
++                struct.numVersions = iprot.readI32();
++                struct.setNumVersionsIsSet(true);
++              } else { 
++                org.apache.thrift.protocol.TProtocolUtil.skip(iprot, schemeField.type);
++              }
++              break;
++            case 5: // ATTRIBUTES
+               if (schemeField.type == org.apache.thrift.protocol.TType.MAP) {
+                 {
+                   org.apache.thrift.protocol.TMap _map258 = iprot.readMapBegin();
+@@ -27495,6 +27724,9 @@ public class Hbase {
+           }
+           oprot.writeFieldEnd();
+         }
++        oprot.writeFieldBegin(NUM_VERSIONS_FIELD_DESC);
++        oprot.writeI32(struct.numVersions);
++        oprot.writeFieldEnd();
+         if (struct.attributes != null) {
+           oprot.writeFieldBegin(ATTRIBUTES_FIELD_DESC);
+           {
+@@ -27535,10 +27767,13 @@ public class Hbase {
+         if (struct.isSetColumns()) {
+           optionals.set(2);
+         }
+-        if (struct.isSetAttributes()) {
++        if (struct.isSetNumVersions()) {
+           optionals.set(3);
+         }
+-        oprot.writeBitSet(optionals, 4);
++        if (struct.isSetAttributes()) {
++          optionals.set(4);
++        }
++        oprot.writeBitSet(optionals, 5);
+         if (struct.isSetTableName()) {
+           oprot.writeBinary(struct.tableName);
+         }
+@@ -27560,6 +27795,9 @@ public class Hbase {
+             }
+           }
+         }
++        if (struct.isSetNumVersions()) {
++          oprot.writeI32(struct.numVersions);
++        }
+         if (struct.isSetAttributes()) {
+           {
+             oprot.writeI32(struct.attributes.size());
+@@ -27575,7 +27813,7 @@ public class Hbase {
+       @Override
+       public void read(org.apache.thrift.protocol.TProtocol prot, getRowsWithColumns_args struct) throws org.apache.thrift.TException {
+         TTupleProtocol iprot = (TTupleProtocol) prot;
+-        BitSet incoming = iprot.readBitSet(4);
++        BitSet incoming = iprot.readBitSet(5);
+         if (incoming.get(0)) {
+           struct.tableName = iprot.readBinary();
+           struct.setTableNameIsSet(true);
+@@ -27607,6 +27845,10 @@ public class Hbase {
+           struct.setColumnsIsSet(true);
+         }
+         if (incoming.get(3)) {
++          struct.numVersions = iprot.readI32();
++          struct.setNumVersionsIsSet(true);
++        }
++        if (incoming.get(4)) {
+           {
+             org.apache.thrift.protocol.TMap _map274 = new org.apache.thrift.protocol.TMap(org.apache.thrift.protocol.TType.STRING, org.apache.thrift.protocol.TType.STRING, iprot.readI32());
+             struct.attributes = new HashMap<ByteBuffer,ByteBuffer>(2*_map274.size);
+diff --git a/hbase-thrift/src/main/resources/org/apache/hadoop/hbase/thrift/Hbase.thrift b/hbase-thrift/src/main/resources/org/apache/hadoop/hbase/thrift/Hbase.thrift
+index 13faa8e..b841af2 100644
+--- a/hbase-thrift/src/main/resources/org/apache/hadoop/hbase/thrift/Hbase.thrift
++++ b/hbase-thrift/src/main/resources/org/apache/hadoop/hbase/thrift/Hbase.thrift
+@@ -388,8 +388,11 @@ service Hbase {
+     /** List of columns to return, null for all columns */
+     3:list<Text> columns,
+ 
++    /** number of versions to retrieve */
++    4:i32 numVersions,
++
+     /** Get attributes */
+-    4:map<Text, Text> attributes
++    5:map<Text, Text> attributes
+   ) throws (1:IOError io)
+ 
+   /** 
+@@ -466,8 +469,11 @@ service Hbase {
+     /** List of columns to return, null for all columns */
+     3:list<Text> columns,
+ 
++    /** number of versions to retrieve */
++    4:i32 numVersions,
++
+     /** Get attributes */
+-    4:map<Text, Text> attributes
++    5:map<Text, Text> attributes
+   ) throws (1:IOError io)
+ 
+   /**
+diff --git a/hbase-thrift/src/test/java/org/apache/hadoop/hbase/thrift/TestThriftServer.java b/hbase-thrift/src/test/java/org/apache/hadoop/hbase/thrift/TestThriftServer.java
+index 06a7d3d..85c6908 100644
+--- a/hbase-thrift/src/test/java/org/apache/hadoop/hbase/thrift/TestThriftServer.java
++++ b/hbase-thrift/src/test/java/org/apache/hadoop/hbase/thrift/TestThriftServer.java
+@@ -413,6 +413,9 @@ public class TestThriftServer {
+     assertEquals(1, handler.getVerTs(tableAname, rowAname, columnBname, time1,
+       MAXVERSIONS, null).size());
+ 
++    List<ByteBuffer> columns = new ArrayList<ByteBuffer>(1);
++    columns.add(columnBname);
++
+     TRowResult rowResult1 = handler.getRowTs(tableAname, rowAname, time1, null).get(0);
+     TRowResult rowResult2 = handler.getRowTs(tableAname, rowAname, time2, null).get(0);
+     // columnA was completely deleted
+@@ -420,13 +423,25 @@ public class TestThriftServer {
+     assertEquals(rowResult1.columns.get(columnBname).value, valueBname);
+     assertEquals(rowResult2.columns.get(columnBname).value, valueCname);
+ 
++    // decide retrieve num versions from the latest one here, and the function return you the earliest one.
++    rowResult1 = handler.getRowWithColumns(tableAname, rowAname, columns, 2, null).get(0);
++    rowResult2 = handler.getRowWithColumns(tableAname, rowAname, columns, 1, null).get(0);
++    assertEquals(rowResult1.columns.get(columnBname).value, valueBname);
++    assertEquals(rowResult2.columns.get(columnBname).value, valueCname);
++
++    List<ByteBuffer> rows = new ArrayList<ByteBuffer>();
++    rows.add(rowAname);
++    rows.add(rowAname);
++    List<TRowResult> rowResults = handler.getRowsWithColumns(tableAname, rows, columns, 2, null);
++    assertEquals(2, rowResults.size());
++    assertEquals(rowResults.get(0).columns.get(columnBname).value, valueBname);
++
+     // ColumnAname has been deleted, and will never be visible even with a getRowTs()
+     assertFalse(rowResult2.columns.containsKey(columnAname));
+ 
+-    List<ByteBuffer> columns = new ArrayList<ByteBuffer>(1);
+-    columns.add(columnBname);
+ 
+-    rowResult1 = handler.getRowWithColumns(tableAname, rowAname, columns, null).get(0);
++
++    rowResult1 = handler.getRowWithColumns(tableAname, rowAname, columns, 1, null).get(0);
+     assertEquals(rowResult1.columns.get(columnBname).value, valueCname);
+     assertFalse(rowResult1.columns.containsKey(columnAname));
+ 
+-- 
+2.10.1 (Apple Git-78)
+

@@ -1,0 +1,32 @@
+From 0425c4d99fabae7a6cc0733382c356e30db03544 Mon Sep 17 00:00:00 2001
+From: Michael Stack <stack@apache.org>
+Date: Wed, 7 Nov 2018 22:37:00 -0800
+Subject: [PATCH] HBASE-21454 Kill zk spew
+
+---
+ conf/log4j.properties | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/conf/log4j.properties b/conf/log4j.properties
+index af283191e0..195b2f2f1b 100644
+--- a/conf/log4j.properties
++++ b/conf/log4j.properties
+@@ -20,6 +20,7 @@ hbase.security.logger=INFO,console
+ hbase.log.dir=.
+ hbase.log.file=hbase.log
+ hbase.log.level=INFO
++zk.log.level=WARN
+ 
+ # Define the root logger to the system property "hbase.root.logger".
+ log4j.rootLogger=${hbase.root.logger}
+@@ -93,7 +94,7 @@ log4j.appender.asyncconsole.target=System.err
+ 
+ # Custom Logging levels
+ 
+-log4j.logger.org.apache.zookeeper=${hbase.log.level}
++log4j.logger.org.apache.zookeeper=${zk.log.level}
+ #log4j.logger.org.apache.hadoop.fs.FSNamesystem=DEBUG
+ log4j.logger.org.apache.hadoop.hbase=${hbase.log.level}
+ log4j.logger.org.apache.hadoop.hbase.META=${hbase.log.level}
+-- 
+2.16.3

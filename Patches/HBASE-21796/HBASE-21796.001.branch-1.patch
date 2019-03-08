@@ -1,0 +1,654 @@
+From 33a804890d464b95fd3e98db187dcab1c9c720b8 Mon Sep 17 00:00:00 2001
+From: Josh Elser <elserj@apache.org>
+Date: Mon, 28 Jan 2019 11:53:58 -0500
+Subject: [PATCH] HBASE-21796 Recover a ZK client from the AUTH_FAILED state
+
+---
+ .../hbase/client/ConnectionManager.java       |  20 ++-
+ .../hbase/zookeeper/RecoverableZooKeeper.java |  88 ++++++++++++-
+ .../apache/hadoop/hbase/zookeeper/ZKUtil.java |  36 +++++-
+ .../client/HConnectionTestingUtility.java     |  19 +++
+ .../AuthFailingRecoverableZooKeeper.java      |  54 ++++++++
+ .../hbase/zookeeper/AuthFailingZooKeeper.java | 100 ++++++++++++++
+ .../zookeeper/TestZKAuthFailedRecovery.java   | 122 ++++++++++++++++++
+ 7 files changed, 428 insertions(+), 11 deletions(-)
+ create mode 100644 hbase-server/src/test/java/org/apache/hadoop/hbase/zookeeper/AuthFailingRecoverableZooKeeper.java
+ create mode 100644 hbase-server/src/test/java/org/apache/hadoop/hbase/zookeeper/AuthFailingZooKeeper.java
+ create mode 100644 hbase-server/src/test/java/org/apache/hadoop/hbase/zookeeper/TestZKAuthFailedRecovery.java
+
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/client/ConnectionManager.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/client/ConnectionManager.java
+index 35ffa3eaf9..7dc62d7a22 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/client/ConnectionManager.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/client/ConnectionManager.java
+@@ -1468,16 +1468,32 @@ class ConnectionManager {
+     @Override
+     public void clearRegionCache() {
+       metaCache.clearCache();
++      clearMetaRegionLocation();
+     }
+ 
+     @Override
+     public void clearRegionCache(final TableName tableName) {
+-      metaCache.clearCache(tableName);
++      if (TableName.META_TABLE_NAME.equals(tableName)) {
++        clearMetaRegionLocation();
++      } else {
++        metaCache.clearCache(tableName);
++      }
+     }
+ 
+     @Override
+     public void clearRegionCache(final byte[] tableName) {
+-      clearRegionCache(TableName.valueOf(tableName));
++      if (Bytes.equals(TableName.META_TABLE_NAME.getName(), tableName)) {
++        clearMetaRegionLocation();
++      } else {
++        clearRegionCache(TableName.valueOf(tableName));
++      }
++    }
++
++    private void clearMetaRegionLocation() {
++      // Meta's location is cached separately from the MetaCache
++      synchronized (metaRegionLock) {
++        this.metaLocations = null;
++      }
+     }
+ 
+     /**
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/zookeeper/RecoverableZooKeeper.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/zookeeper/RecoverableZooKeeper.java
+index 36fb5f9894..4edd1b7318 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/zookeeper/RecoverableZooKeeper.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/zookeeper/RecoverableZooKeeper.java
+@@ -137,16 +137,38 @@ public class RecoverableZooKeeper {
+    */
+   protected synchronized ZooKeeper checkZk() throws KeeperException {
+     if (this.zk == null) {
+-      try {
+-        this.zk = new ZooKeeper(quorumServers, sessionTimeout, watcher);
+-      } catch (IOException ex) {
+-        LOG.warn("Unable to create ZooKeeper Connection", ex);
+-        throw new KeeperException.OperationTimeoutException();
+-      }
++      this.zk = createNewZooKeeper();
+     }
+     return zk;
+   }
+ 
++  /**
++   * Creates a new ZooKeeper client. Implemented in its own method to
++   * allow for mock'ed objects to be returned for testing.
++   */
++  ZooKeeper createNewZooKeeper() throws KeeperException {
++    try {
++      return new ZooKeeper(quorumServers, sessionTimeout, watcher);
++    } catch (IOException ex) {
++      LOG.warn("Unable to create ZooKeeper Connection", ex);
++      throw new KeeperException.OperationTimeoutException();
++    }
++  }
++
++  public synchronized void reconnectAfterAuthFailure() throws InterruptedException,
++        KeeperException {
++    if (zk != null) {
++      LOG.info("Closing ZooKeeper connection which saw AUTH_FAILED, session" +
++          " was: 0x"+Long.toHexString(zk.getSessionId()));
++      zk.close();
++      // Null out the ZK object so checkZk() will create a new one
++      zk = null;
++    }
++    checkZk();
++    LOG.info("Recreated a ZooKeeper, session" +
++        " is: 0x"+Long.toHexString(zk.getSessionId()));
++  }
++
+   public synchronized void reconnectAfterExpiration()
+         throws IOException, KeeperException, InterruptedException {
+     if (zk != null) {
+@@ -192,6 +214,10 @@ public class RecoverableZooKeeper {
+             case OPERATIONTIMEOUT:
+               retryOrThrow(retryCounter, e, "delete");
+               break;
++            case AUTHFAILED:
++              reconnectAfterAuthFailure();
++              retryOrThrow(retryCounter, e, "delete");
++              break;
+ 
+             default:
+               throw e;
+@@ -224,6 +250,10 @@ public class RecoverableZooKeeper {
+             case OPERATIONTIMEOUT:
+               retryOrThrow(retryCounter, e, "exists");
+               break;
++            case AUTHFAILED:
++              reconnectAfterAuthFailure();
++              retryOrThrow(retryCounter, e, "exists");
++              break;
+ 
+             default:
+               throw e;
+@@ -255,6 +285,10 @@ public class RecoverableZooKeeper {
+             case OPERATIONTIMEOUT:
+               retryOrThrow(retryCounter, e, "exists");
+               break;
++            case AUTHFAILED:
++              reconnectAfterAuthFailure();
++              retryOrThrow(retryCounter, e, "exists");
++              break;
+ 
+             default:
+               throw e;
+@@ -269,7 +303,7 @@ public class RecoverableZooKeeper {
+ 
+   private void retryOrThrow(RetryCounter retryCounter, KeeperException e,
+       String opName) throws KeeperException {
+-    LOG.debug("Possibly transient ZooKeeper, quorum=" + quorumServers + ", exception=" + e);
++    LOG.debug("Possibly transient ZooKeeper, quorum=" + quorumServers + ", exception=" + e, e);
+     if (!retryCounter.shouldRetry()) {
+       LOG.error("ZooKeeper " + opName + " failed after "
+         + retryCounter.getMaxAttempts() + " attempts");
+@@ -296,6 +330,10 @@ public class RecoverableZooKeeper {
+             case OPERATIONTIMEOUT:
+               retryOrThrow(retryCounter, e, "getChildren");
+               break;
++            case AUTHFAILED:
++              reconnectAfterAuthFailure();
++              retryOrThrow(retryCounter, e, "getChildren");
++              break;
+ 
+             default:
+               throw e;
+@@ -327,6 +365,10 @@ public class RecoverableZooKeeper {
+             case OPERATIONTIMEOUT:
+               retryOrThrow(retryCounter, e, "getChildren");
+               break;
++            case AUTHFAILED:
++              reconnectAfterAuthFailure();
++              retryOrThrow(retryCounter, e, "getChildren");
++              break;
+ 
+             default:
+               throw e;
+@@ -359,6 +401,10 @@ public class RecoverableZooKeeper {
+             case OPERATIONTIMEOUT:
+               retryOrThrow(retryCounter, e, "getData");
+               break;
++            case AUTHFAILED:
++              reconnectAfterAuthFailure();
++              retryOrThrow(retryCounter, e, "getData");
++              break;
+ 
+             default:
+               throw e;
+@@ -391,6 +437,10 @@ public class RecoverableZooKeeper {
+             case OPERATIONTIMEOUT:
+               retryOrThrow(retryCounter, e, "getData");
+               break;
++            case AUTHFAILED:
++              reconnectAfterAuthFailure();
++              retryOrThrow(retryCounter, e, "getData");
++              break;
+ 
+             default:
+               throw e;
+@@ -426,6 +476,10 @@ public class RecoverableZooKeeper {
+             case OPERATIONTIMEOUT:
+               retryOrThrow(retryCounter, e, "setData");
+               break;
++            case AUTHFAILED:
++              reconnectAfterAuthFailure();
++              retryOrThrow(retryCounter, e, "setData");
++              break;
+             case BADVERSION:
+               if (isRetry) {
+                 // try to verify whether the previous setData success or not
+@@ -473,6 +527,10 @@ public class RecoverableZooKeeper {
+             case OPERATIONTIMEOUT:
+               retryOrThrow(retryCounter, e, "getAcl");
+               break;
++            case AUTHFAILED:
++              reconnectAfterAuthFailure();
++              retryOrThrow(retryCounter, e, "getAcl");
++              break;
+ 
+             default:
+               throw e;
+@@ -504,6 +562,10 @@ public class RecoverableZooKeeper {
+             case OPERATIONTIMEOUT:
+               retryOrThrow(retryCounter, e, "setAcl");
+               break;
++            case AUTHFAILED:
++              reconnectAfterAuthFailure();
++              retryOrThrow(retryCounter, e, "setAcl");
++              break;
+ 
+             default:
+               throw e;
+@@ -588,6 +650,10 @@ public class RecoverableZooKeeper {
+           case OPERATIONTIMEOUT:
+             retryOrThrow(retryCounter, e, "create");
+             break;
++          case AUTHFAILED:
++            reconnectAfterAuthFailure();
++            retryOrThrow(retryCounter, e, "create");
++            break;
+ 
+           default:
+             throw e;
+@@ -621,6 +687,10 @@ public class RecoverableZooKeeper {
+           case OPERATIONTIMEOUT:
+             retryOrThrow(retryCounter, e, "create");
+             break;
++          case AUTHFAILED:
++            reconnectAfterAuthFailure();
++            retryOrThrow(retryCounter, e, "create");
++            break;
+ 
+           default:
+             throw e;
+@@ -676,6 +746,10 @@ public class RecoverableZooKeeper {
+             case OPERATIONTIMEOUT:
+               retryOrThrow(retryCounter, e, "multi");
+               break;
++            case AUTHFAILED:
++              reconnectAfterAuthFailure();
++              retryOrThrow(retryCounter, e, "multi");
++              break;
+ 
+             default:
+               throw e;
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/zookeeper/ZKUtil.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/zookeeper/ZKUtil.java
+index 4f1d87c6b3..9970706450 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/zookeeper/ZKUtil.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/zookeeper/ZKUtil.java
+@@ -100,6 +100,27 @@ public class ZKUtil {
+   public static final char ZNODE_PATH_SEPARATOR = '/';
+   private static int zkDumpConnectionTimeOut;
+ 
++  /**
++   * Interface to allow custom implementations of RecoverableZooKeeper to be created.
++   */
++  public static interface ZooKeeperFactory {
++    /**
++     * Creates a new instance of a RecoverableZooKeeper.
++     */
++    RecoverableZooKeeper create(String quorumServers, int sessionTimeout,
++      Watcher watcher, int maxRetries, int retryIntervalMillis, int maxSleepTime, String identifier) throws IOException;
++  }
++
++  public static class DefaultZooKeeperFactory implements ZooKeeperFactory {
++    @Override
++    public RecoverableZooKeeper create(String quorumServers, int sessionTimeout,
++      Watcher watcher, int maxRetries, int retryIntervalMillis, int maxSleepTime,
++      String identifier) throws IOException {
++      return new RecoverableZooKeeper(quorumServers, sessionTimeout, watcher, maxRetries,
++          retryIntervalMillis, maxSleepTime, identifier);
++    }
++  }
++
+   /**
+    * Creates a new connection to ZooKeeper, pulling settings and ensemble config
+    * from the specified configuration object using methods from {@link ZKConfig}.
+@@ -140,8 +161,19 @@ public class ZKUtil {
+     int maxSleepTime = conf.getInt("zookeeper.recovery.retry.maxsleeptime", 60000);
+     zkDumpConnectionTimeOut = conf.getInt("zookeeper.dump.connection.timeout",
+         1000);
+-    return new RecoverableZooKeeper(ensemble, timeout, watcher,
+-        retry, retryIntervalMillis, maxSleepTime, identifier);
++
++    Class<? extends ZooKeeperFactory> factoryClz = conf.getClass("zookeeper.factory.class",
++        DefaultZooKeeperFactory.class, ZooKeeperFactory.class);
++    try {
++      ZooKeeperFactory factory = factoryClz.newInstance();
++      return factory.create(ensemble, timeout, watcher, retry, retryIntervalMillis,
++          maxSleepTime, identifier);
++    } catch (Exception e) {
++      if (e instanceof RuntimeException) {
++        throw (RuntimeException) e;
++      }
++      throw new RuntimeException(e);
++    }
+   }
+ 
+   /**
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/client/HConnectionTestingUtility.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/client/HConnectionTestingUtility.java
+index 89436e9e2f..52de587096 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/client/HConnectionTestingUtility.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/client/HConnectionTestingUtility.java
+@@ -17,6 +17,9 @@
+  */
+ package org.apache.hadoop.hbase.client;
+ 
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotNull;
++
+ import java.io.IOException;
+ import java.util.concurrent.atomic.AtomicLong;
+ 
+@@ -33,6 +36,7 @@ import org.apache.hadoop.hbase.protobuf.generated.ClientProtos;
+ import org.apache.hadoop.hbase.util.Threads;
+ import org.apache.hadoop.hbase.client.ConnectionManager.HConnectionImplementation;
+ import org.apache.hadoop.hbase.coprocessor.BaseRegionObserver;
++import org.apache.hadoop.hbase.zookeeper.RecoverableZooKeeper;
+ import org.apache.hadoop.hbase.coprocessor.ObserverContext;
+ import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
+ import org.apache.hadoop.hbase.ipc.RpcControllerFactory;
+@@ -224,6 +228,21 @@ public class HConnectionTestingUtility {
+     }
+   }
+ 
++  public static HConnectionImplementation requireHConnImpl(Connection conn) {
++    assertNotNull("Cannot operate on a null Connection", conn);
++    assertEquals("This method requires an HConnectionImplementation",
++        HConnectionImplementation.class, conn.getClass());
++    return (HConnectionImplementation) conn;
++  }
++
++  public static RecoverableZooKeeper unwrapZK(Connection conn) throws IOException {
++    return requireHConnImpl(conn).getKeepAliveZooKeeperWatcher().getRecoverableZooKeeper();
++  }
++
++  public static void clearRegionCache(Connection conn) throws IOException {
++    requireHConnImpl(conn).clearRegionCache();
++  }
++
+   /**
+    * This coproceesor sleep 2s at first increment/append rpc call.
+    */
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/zookeeper/AuthFailingRecoverableZooKeeper.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/zookeeper/AuthFailingRecoverableZooKeeper.java
+new file mode 100644
+index 0000000000..7bf7f3fb53
+--- /dev/null
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/zookeeper/AuthFailingRecoverableZooKeeper.java
+@@ -0,0 +1,54 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hbase.zookeeper;
++
++import java.io.IOException;
++
++import org.apache.hadoop.hbase.zookeeper.RecoverableZooKeeper;
++import org.apache.zookeeper.KeeperException;
++import org.apache.zookeeper.Watcher;
++import org.apache.zookeeper.ZooKeeper;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++public class AuthFailingRecoverableZooKeeper extends RecoverableZooKeeper {
++  private static final Logger LOG = LoggerFactory.getLogger(AuthFailingRecoverableZooKeeper.class);
++  private Watcher watcher;
++  private int sessionTimeout;
++  private String quorumServers;
++
++  public AuthFailingRecoverableZooKeeper(String quorumServers, int sessionTimeout, Watcher watcher, int maxRetries,
++      int retryIntervalMillis, int maxSleepTime, String identifier) throws IOException {
++    super(quorumServers, sessionTimeout, watcher, maxRetries, retryIntervalMillis, maxSleepTime,
++        identifier);
++    this.quorumServers = quorumServers;
++    this.sessionTimeout = sessionTimeout;
++    this.watcher = watcher;
++  }
++
++  @Override
++  ZooKeeper createNewZooKeeper() throws KeeperException {
++    try {
++      // Construct our "special" ZooKeeper instance
++      return new AuthFailingZooKeeper(quorumServers, sessionTimeout, watcher);
++    } catch (IOException ex) {
++      LOG.warn("Unable to create ZooKeeper Connection", ex);
++      throw new KeeperException.OperationTimeoutException();
++    }
++  }
++}
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/zookeeper/AuthFailingZooKeeper.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/zookeeper/AuthFailingZooKeeper.java
+new file mode 100644
+index 0000000000..4d0e7861fb
+--- /dev/null
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/zookeeper/AuthFailingZooKeeper.java
+@@ -0,0 +1,100 @@
++/*
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hbase.zookeeper;
++
++import java.io.IOException;
++import java.util.List;
++import java.util.concurrent.atomic.AtomicBoolean;
++
++import org.apache.zookeeper.CreateMode;
++import org.apache.zookeeper.KeeperException;
++import org.apache.zookeeper.KeeperException.AuthFailedException;
++import org.apache.zookeeper.Watcher;
++import org.apache.zookeeper.ZooKeeper;
++import org.apache.zookeeper.data.ACL;
++import org.apache.zookeeper.data.Stat;
++
++/**
++ * A wrapper around {@link ZooKeeper} which tries to mimic semantics around AUTH_FAILED. When
++ * an AuthFailedException is thrown the first time, it is thrown every time after that.
++ */
++public class AuthFailingZooKeeper extends ZooKeeper {
++  private static final AuthFailedException AUTH_FAILED_EXCEPTION = new AuthFailedException();
++
++  // Latch for the "first" AUTH_FAILED occurrence
++  private final AtomicBoolean FAILURE_LATCH = new AtomicBoolean(false);
++  // Latch for when we start always throwing AUTH_FAILED
++  private final AtomicBoolean IS_AUTH_FAILED = new AtomicBoolean(false);
++
++  public AuthFailingZooKeeper(String connectString, int sessionTimeout, Watcher watcher) throws IOException {
++    super(connectString, sessionTimeout, watcher);
++  }
++
++  /**
++   * Causes AUTH_FAILED exceptions to be thrown by {@code this}.
++   */
++  public void triggerAuthFailed() {
++    FAILURE_LATCH.set(true);
++  }
++
++  void check() throws KeeperException {
++    // ZK state model states that once an AUTH_FAILED exception is thrown, it is thrown for
++    // every subsequent operation
++    if (IS_AUTH_FAILED.get()) {
++      throw AUTH_FAILED_EXCEPTION;
++    }
++    // We're not yet throwing AUTH_FAILED
++    if (!FAILURE_LATCH.get()) {
++      return;
++    }
++    // Start throwing AUTH_FAILED
++    IS_AUTH_FAILED.set(true);
++    throw AUTH_FAILED_EXCEPTION;
++  }
++
++  @Override
++  public byte[] getData(String path, Watcher watcher, Stat stat) throws KeeperException, InterruptedException {
++    check();
++    return super.getData(path, watcher, stat);
++  }
++
++  @Override
++  public String create(String path, byte[] data, List<ACL> acl, CreateMode cmode) throws KeeperException, InterruptedException {
++    check();
++    return super.create(path,  data, acl, cmode);
++  }
++
++  @Override
++  public Stat exists(String path, boolean watch) throws KeeperException, InterruptedException {
++    check();
++    return super.exists(path, watch);
++  }
++
++  @Override
++  public Stat exists(String path, Watcher watcher) throws KeeperException, InterruptedException {
++    check();
++    return super.exists(path, watcher);
++  }
++
++  @Override
++  public List<String> getChildren(String path, boolean watch) throws KeeperException, InterruptedException {
++    check();
++    return super.getChildren(path, watch);
++  }
++}
+\ No newline at end of file
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/zookeeper/TestZKAuthFailedRecovery.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/zookeeper/TestZKAuthFailedRecovery.java
+new file mode 100644
+index 0000000000..742cb47ee2
+--- /dev/null
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/zookeeper/TestZKAuthFailedRecovery.java
+@@ -0,0 +1,122 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hbase.zookeeper;
++
++import static org.junit.Assert.assertEquals;
++
++import java.io.IOException;
++import java.util.concurrent.Callable;
++import java.util.concurrent.ExecutionException;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.concurrent.Future;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.TimeoutException;
++
++import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.hbase.HBaseTestingUtility;
++import org.apache.hadoop.hbase.TableName;
++import org.apache.hadoop.hbase.client.Connection;
++import org.apache.hadoop.hbase.client.ConnectionFactory;
++import org.apache.hadoop.hbase.client.HConnectionTestingUtility;
++import org.apache.hadoop.hbase.client.Table;
++import org.apache.hadoop.hbase.testclassification.MediumTests;
++import org.apache.hadoop.hbase.zookeeper.ZKUtil.ZooKeeperFactory;
++import org.apache.zookeeper.Watcher;
++import org.apache.zookeeper.ZooKeeper;
++import org.junit.AfterClass;
++import org.junit.Assert;
++import org.junit.BeforeClass;
++import org.junit.Test;
++import org.junit.experimental.categories.Category;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++@Category(MediumTests.class)
++public class TestZKAuthFailedRecovery {
++  final Logger LOG = LoggerFactory.getLogger(getClass());
++  protected final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
++
++  public static class AuthFailingZooKeeperFactory implements ZooKeeperFactory {
++    @Override
++    public RecoverableZooKeeper create(String quorumServers, int sessionTimeout, Watcher watcher,
++        int maxRetries, int retryIntervalMillis, int maxSleepTime, String identifier)
++            throws IOException {
++      return new AuthFailingRecoverableZooKeeper(quorumServers, sessionTimeout, watcher, maxRetries,
++          retryIntervalMillis, maxSleepTime, identifier);
++    }
++  }
++
++  @BeforeClass
++  public static void setUpBeforeClass() throws Exception {
++    Configuration conf = TEST_UTIL.getConfiguration();
++    conf.setBoolean("hbase.table.sanity.checks", true); // enable for below tests
++    TEST_UTIL.startMiniCluster(1);
++  }
++
++  @AfterClass
++  public static void tearDownAfterClass() throws Exception {
++    TEST_UTIL.shutdownMiniCluster();
++  }
++
++  @Test
++  public void testFaultyClientZK() throws Exception {
++    Configuration conf = new Configuration(TEST_UTIL.getConfiguration());
++    conf.setClass("zookeeper.factory.class", AuthFailingZooKeeperFactory.class,
++        ZooKeeperFactory.class);
++    LOG.debug("Reading meta first time");
++    final Connection conn = ConnectionFactory.createConnection(conf);
++    try (Table t = conn.getTable(TableName.valueOf("hbase:meta"))) {
++      LOG.info(TEST_UTIL.countRows(t) + " rows in meta");
++    }
++    // Make sure we got our custom ZK wrapper class from the HConn
++    ZooKeeper zk = HConnectionTestingUtility.unwrapZK(conn).checkZk();
++    assertEquals(AuthFailingZooKeeper.class, zk.getClass());
++
++    ((AuthFailingZooKeeper) zk).triggerAuthFailed();
++    // Clear out the region cache to force a read to meta (and thus, a read to ZK)
++    HConnectionTestingUtility.clearRegionCache(conn);
++
++    // Use the HConnection in a way that will talk to ZK
++    ExecutorService svc = Executors.newSingleThreadExecutor();
++    Future<Boolean> res = svc.submit(new Callable<Boolean>() {
++      public Boolean call() {
++        LOG.debug("Reading meta after clearing the Region caches");
++        try (Table t = conn.getTable(TableName.valueOf("hbase:meta"))) {
++          LOG.info(TEST_UTIL.countRows(t) + " rows in meta");
++          return true;
++        } catch (Exception e) {
++          LOG.error("Failed to read hbase:meta", e);
++          return false;
++        }
++      }
++    });
++    // Without proper handling of AUTH_FAILED, this would spin indefinitely. With
++    // the change introduced with this test, we should get a fresh ZK instance that
++    // won't fail repeatedly.
++    try {
++      res.get(30, TimeUnit.SECONDS);
++    } catch (ExecutionException e) {
++      LOG.error("Failed to execute task", e);
++      Assert.fail("Failed to recover from AUTH_FAILED state in zookeeper client");
++    } catch (TimeoutException e) {
++      LOG.error("Task timed out instead of recovering", e);
++      Assert.fail("Failed to recover from AUTH_FAILED state in zookeeper client");
++    }
++  }
++}
+-- 
+2.18.0
+

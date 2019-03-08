@@ -1,0 +1,640 @@
+From c6a1b91d8b203688b4de4c7c2a96d1685aa89b55 Mon Sep 17 00:00:00 2001
+From: Duo Zhang <zhangduo@apache.org>
+Date: Wed, 27 Feb 2019 17:08:24 +0800
+Subject: [PATCH] HBASE-21082 Reimplement assign/unassign related procedure
+ metrics
+
+---
+ .../MetricsAssignmentManagerSource.java       |  28 ++++-
+ .../MetricsAssignmentManagerSourceImpl.java   |  28 +++++
+ .../src/main/protobuf/MasterProcedure.proto   |  15 ++-
+ .../master/MetricsAssignmentManager.java      |  36 ++++++
+ .../assignment/CloseRegionProcedure.java      |   6 +
+ .../assignment/OpenRegionProcedure.java       |   6 +
+ .../TransitRegionStateProcedure.java          | 105 +++++++++++++-----
+ .../assignment/TestAssignmentManager.java     |  44 ++++++++
+ .../assignment/TestAssignmentManagerBase.java |  26 ++++-
+ .../master/assignment/TestRegionBypass.java   |  18 ++-
+ 10 files changed, 269 insertions(+), 43 deletions(-)
+
+diff --git a/hbase-hadoop-compat/src/main/java/org/apache/hadoop/hbase/master/MetricsAssignmentManagerSource.java b/hbase-hadoop-compat/src/main/java/org/apache/hadoop/hbase/master/MetricsAssignmentManagerSource.java
+index ec4a34e3bd..5e768c419a 100644
+--- a/hbase-hadoop-compat/src/main/java/org/apache/hadoop/hbase/master/MetricsAssignmentManagerSource.java
++++ b/hbase-hadoop-compat/src/main/java/org/apache/hadoop/hbase/master/MetricsAssignmentManagerSource.java
+@@ -61,6 +61,10 @@ public interface MetricsAssignmentManagerSource extends BaseSource {
+ 
+   String ASSIGN_METRIC_PREFIX = "assign";
+   String UNASSIGN_METRIC_PREFIX = "unassign";
++  String MOVE_METRIC_PREFIX = "move";
++  String REOPEN_METRIC_PREFIX = "reopen";
++  String OPEN_METRIC_PREFIX = "open";
++  String CLOSE_METRIC_PREFIX = "close";
+   String SPLIT_METRIC_PREFIX = "split";
+   String MERGE_METRIC_PREFIX = "merge";
+ 
+@@ -96,15 +100,35 @@ public interface MetricsAssignmentManagerSource extends BaseSource {
+   void incrementOperationCounter();
+ 
+   /**
+-   * @return {@link OperationMetrics} containing common metrics for assign operation
++   * @return {@link OperationMetrics} containing common metrics for assign region operation
+    */
+   OperationMetrics getAssignMetrics();
+ 
+   /**
+-   * @return {@link OperationMetrics} containing common metrics for unassign operation
++   * @return {@link OperationMetrics} containing common metrics for unassign region operation
+    */
+   OperationMetrics getUnassignMetrics();
+ 
++  /**
++   * @return {@link OperationMetrics} containing common metrics for move region operation
++   */
++  OperationMetrics getMoveMetrics();
++
++  /**
++   * @return {@link OperationMetrics} containing common metrics for reopen region operation
++   */
++  OperationMetrics getReopenMetrics();
++
++  /**
++   * @return {@link OperationMetrics} containing common metrics for open region request
++   */
++  OperationMetrics getOpenMetrics();
++
++  /**
++   * @return {@link OperationMetrics} containing common metrics for close region request
++   */
++  OperationMetrics getCloseMetrics();
++
+   /**
+    * @return {@link OperationMetrics} containing common metrics for split operation
+    */
+diff --git a/hbase-hadoop2-compat/src/main/java/org/apache/hadoop/hbase/master/MetricsAssignmentManagerSourceImpl.java b/hbase-hadoop2-compat/src/main/java/org/apache/hadoop/hbase/master/MetricsAssignmentManagerSourceImpl.java
+index a702f706a3..2532a2d836 100644
+--- a/hbase-hadoop2-compat/src/main/java/org/apache/hadoop/hbase/master/MetricsAssignmentManagerSourceImpl.java
++++ b/hbase-hadoop2-compat/src/main/java/org/apache/hadoop/hbase/master/MetricsAssignmentManagerSourceImpl.java
+@@ -39,6 +39,10 @@ public class MetricsAssignmentManagerSourceImpl
+ 
+   private OperationMetrics assignMetrics;
+   private OperationMetrics unassignMetrics;
++  private OperationMetrics moveMetrics;
++  private OperationMetrics reopenMetrics;
++  private OperationMetrics openMetrics;
++  private OperationMetrics closeMetrics;
+   private OperationMetrics splitMetrics;
+   private OperationMetrics mergeMetrics;
+ 
+@@ -67,6 +71,10 @@ public class MetricsAssignmentManagerSourceImpl
+      */
+     assignMetrics = new OperationMetrics(registry, ASSIGN_METRIC_PREFIX);
+     unassignMetrics = new OperationMetrics(registry, UNASSIGN_METRIC_PREFIX);
++    moveMetrics = new OperationMetrics(registry, MOVE_METRIC_PREFIX);
++    reopenMetrics = new OperationMetrics(registry, REOPEN_METRIC_PREFIX);
++    openMetrics = new OperationMetrics(registry, OPEN_METRIC_PREFIX);
++    closeMetrics = new OperationMetrics(registry, CLOSE_METRIC_PREFIX);
+     splitMetrics = new OperationMetrics(registry, SPLIT_METRIC_PREFIX);
+     mergeMetrics = new OperationMetrics(registry, MERGE_METRIC_PREFIX);
+   }
+@@ -115,4 +123,24 @@ public class MetricsAssignmentManagerSourceImpl
+   public OperationMetrics getMergeMetrics() {
+     return mergeMetrics;
+   }
++
++  @Override
++  public OperationMetrics getMoveMetrics() {
++    return moveMetrics;
++  }
++
++  @Override
++  public OperationMetrics getReopenMetrics() {
++    return reopenMetrics;
++  }
++
++  @Override
++  public OperationMetrics getOpenMetrics() {
++    return openMetrics;
++  }
++
++  @Override
++  public OperationMetrics getCloseMetrics() {
++    return closeMetrics;
++  }
+ }
+diff --git a/hbase-protocol-shaded/src/main/protobuf/MasterProcedure.proto b/hbase-protocol-shaded/src/main/protobuf/MasterProcedure.proto
+index 59af722e04..32e71693ee 100644
+--- a/hbase-protocol-shaded/src/main/protobuf/MasterProcedure.proto
++++ b/hbase-protocol-shaded/src/main/protobuf/MasterProcedure.proto
+@@ -534,12 +534,17 @@ enum RegionStateTransitionState {
+   REGION_STATE_TRANSITION_CONFIRM_CLOSED = 5;
+ }
+ 
++enum RegionTransitionType {
++  ASSIGN = 1;
++  UNASSIGN = 2;
++  MOVE = 3;
++  REOPEN = 4;
++}
++
+ message RegionStateTransitionStateData {
+-  required RegionStateTransitionState initialState = 1;
+-  required RegionStateTransitionState lastState = 2;
+-  optional ServerName assign_candidate = 3;
+-  required bool force_new_plan = 4;
+-  optional bool override = 5 [default = false];
++  required RegionTransitionType type = 1;
++  optional ServerName assign_candidate = 2;
++  required bool force_new_plan = 3;
+ }
+ 
+ message RegionRemoteProcedureBaseStateData {
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/MetricsAssignmentManager.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/MetricsAssignmentManager.java
+index d13ffe9b83..8b214f83e6 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/MetricsAssignmentManager.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/MetricsAssignmentManager.java
+@@ -30,6 +30,10 @@ public class MetricsAssignmentManager {
+ 
+   private final ProcedureMetrics assignProcMetrics;
+   private final ProcedureMetrics unassignProcMetrics;
++  private final ProcedureMetrics moveProcMetrics;
++  private final ProcedureMetrics reopenProcMetrics;
++  private final ProcedureMetrics openProcMetrics;
++  private final ProcedureMetrics closeProcMetrics;
+   private final ProcedureMetrics splitProcMetrics;
+   private final ProcedureMetrics mergeProcMetrics;
+ 
+@@ -39,6 +43,10 @@ public class MetricsAssignmentManager {
+ 
+     assignProcMetrics = convertToProcedureMetrics(assignmentManagerSource.getAssignMetrics());
+     unassignProcMetrics = convertToProcedureMetrics(assignmentManagerSource.getUnassignMetrics());
++    moveProcMetrics = convertToProcedureMetrics(assignmentManagerSource.getMoveMetrics());
++    reopenProcMetrics = convertToProcedureMetrics(assignmentManagerSource.getReopenMetrics());
++    openProcMetrics = convertToProcedureMetrics(assignmentManagerSource.getOpenMetrics());
++    closeProcMetrics = convertToProcedureMetrics(assignmentManagerSource.getCloseMetrics());
+     splitProcMetrics = convertToProcedureMetrics(assignmentManagerSource.getSplitMetrics());
+     mergeProcMetrics = convertToProcedureMetrics(assignmentManagerSource.getMergeMetrics());
+   }
+@@ -102,6 +110,34 @@ public class MetricsAssignmentManager {
+     return unassignProcMetrics;
+   }
+ 
++  /**
++   * @return Set of common metrics for move procedure
++   */
++  public ProcedureMetrics getMoveProcMetrics() {
++    return moveProcMetrics;
++  }
++
++  /**
++   * @return Set of common metrics for reopen procedure
++   */
++  public ProcedureMetrics getReopenProcMetrics() {
++    return reopenProcMetrics;
++  }
++
++  /**
++   * @return Set of common metrics for OpenRegionProcedure
++   */
++  public ProcedureMetrics getOpenProcMetrics() {
++    return openProcMetrics;
++  }
++
++  /**
++   * @return Set of common metrics for CloseRegionProcedure
++   */
++  public ProcedureMetrics getCloseProcMetrics() {
++    return closeProcMetrics;
++  }
++
+   /**
+    * @return Set of common metrics for split procedure
+    */
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/assignment/CloseRegionProcedure.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/assignment/CloseRegionProcedure.java
+index fd672fa036..f867e96459 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/assignment/CloseRegionProcedure.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/assignment/CloseRegionProcedure.java
+@@ -23,6 +23,7 @@ import org.apache.hadoop.hbase.client.RegionInfo;
+ import org.apache.hadoop.hbase.master.RegionState;
+ import org.apache.hadoop.hbase.master.procedure.MasterProcedureEnv;
+ import org.apache.hadoop.hbase.master.procedure.RSProcedureDispatcher.RegionCloseOperation;
++import org.apache.hadoop.hbase.procedure2.ProcedureMetrics;
+ import org.apache.hadoop.hbase.procedure2.ProcedureStateSerializer;
+ import org.apache.hadoop.hbase.procedure2.RemoteProcedureDispatcher.RemoteOperation;
+ import org.apache.yetus.audience.InterfaceAudience;
+@@ -81,6 +82,11 @@ public class CloseRegionProcedure extends RegionRemoteProcedureBase {
+     }
+   }
+ 
++  @Override
++  protected ProcedureMetrics getProcedureMetrics(MasterProcedureEnv env) {
++    return env.getAssignmentManager().getAssignmentManagerMetrics().getCloseProcMetrics();
++  }
++
+   @Override
+   protected boolean shouldDispatch(RegionStateNode regionNode) {
+     return regionNode.isInState(RegionState.State.CLOSING);
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/assignment/OpenRegionProcedure.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/assignment/OpenRegionProcedure.java
+index ed5836dcfb..4b3a976f28 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/assignment/OpenRegionProcedure.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/assignment/OpenRegionProcedure.java
+@@ -23,6 +23,7 @@ import org.apache.hadoop.hbase.client.RegionInfo;
+ import org.apache.hadoop.hbase.master.RegionState;
+ import org.apache.hadoop.hbase.master.procedure.MasterProcedureEnv;
+ import org.apache.hadoop.hbase.master.procedure.RSProcedureDispatcher.RegionOpenOperation;
++import org.apache.hadoop.hbase.procedure2.ProcedureMetrics;
+ import org.apache.hadoop.hbase.procedure2.ProcedureStateSerializer;
+ import org.apache.hadoop.hbase.procedure2.RemoteProcedureDispatcher.RemoteOperation;
+ import org.apache.yetus.audience.InterfaceAudience;
+@@ -66,6 +67,11 @@ public class OpenRegionProcedure extends RegionRemoteProcedureBase {
+     serializer.deserialize(OpenRegionProcedureStateData.class);
+   }
+ 
++  @Override
++  protected ProcedureMetrics getProcedureMetrics(MasterProcedureEnv env) {
++    return env.getAssignmentManager().getAssignmentManagerMetrics().getOpenProcMetrics();
++  }
++
+   @Override
+   protected boolean shouldDispatch(RegionStateNode regionNode) {
+     return regionNode.isInState(RegionState.State.OPENING);
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/assignment/TransitRegionStateProcedure.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/assignment/TransitRegionStateProcedure.java
+index 2d022b7bad..d3429b5a01 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/assignment/TransitRegionStateProcedure.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/assignment/TransitRegionStateProcedure.java
+@@ -29,6 +29,7 @@ import org.apache.hadoop.hbase.client.RegionInfo;
+ import org.apache.hadoop.hbase.client.RegionReplicaUtil;
+ import org.apache.hadoop.hbase.client.RetriesExhaustedException;
+ import org.apache.hadoop.hbase.exceptions.UnexpectedStateException;
++import org.apache.hadoop.hbase.master.MetricsAssignmentManager;
+ import org.apache.hadoop.hbase.master.RegionState.State;
+ import org.apache.hadoop.hbase.master.procedure.AbstractStateMachineRegionProcedure;
+ import org.apache.hadoop.hbase.master.procedure.MasterProcedureEnv;
+@@ -48,6 +49,7 @@ import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesti
+ import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.RegionStateTransitionState;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.RegionStateTransitionStateData;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.RegionTransitionType;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.ProcedureProtos;
+ import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionStateTransition.TransitionCode;
+ 
+@@ -106,6 +108,8 @@ public class TransitRegionStateProcedure
+ 
+   private static final Logger LOG = LoggerFactory.getLogger(TransitRegionStateProcedure.class);
+ 
++  private TransitionType type;
++
+   private RegionStateTransitionState initialState;
+ 
+   private RegionStateTransitionState lastState;
+@@ -120,15 +124,33 @@ public class TransitRegionStateProcedure
+   public TransitRegionStateProcedure() {
+   }
+ 
++  private void setInitalAndLastState() {
++    switch (type) {
++      case ASSIGN:
++        initialState = RegionStateTransitionState.REGION_STATE_TRANSITION_GET_ASSIGN_CANDIDATE;
++        lastState = RegionStateTransitionState.REGION_STATE_TRANSITION_CONFIRM_OPENED;
++        break;
++      case UNASSIGN:
++        initialState = RegionStateTransitionState.REGION_STATE_TRANSITION_CLOSE;
++        lastState = RegionStateTransitionState.REGION_STATE_TRANSITION_CONFIRM_CLOSED;
++        break;
++      case MOVE:
++      case REOPEN:
++        initialState = RegionStateTransitionState.REGION_STATE_TRANSITION_CLOSE;
++        lastState = RegionStateTransitionState.REGION_STATE_TRANSITION_CONFIRM_OPENED;
++        break;
++      default:
++        throw new IllegalArgumentException("Unknown TransitionType: " + type);
++    }
++  }
+   @VisibleForTesting
+   protected TransitRegionStateProcedure(MasterProcedureEnv env, RegionInfo hri,
+-      ServerName assignCandidate, boolean forceNewPlan, RegionStateTransitionState initialState,
+-      RegionStateTransitionState lastState) {
++      ServerName assignCandidate, boolean forceNewPlan, TransitionType type) {
+     super(env, hri);
+     this.assignCandidate = assignCandidate;
+     this.forceNewPlan = forceNewPlan;
+-    this.initialState = initialState;
+-    this.lastState = lastState;
++    this.type = type;
++    setInitalAndLastState();
+   }
+ 
+   @Override
+@@ -548,11 +570,41 @@ public class TransitRegionStateProcedure
+     return initialState;
+   }
+ 
++  private static TransitionType convert(RegionTransitionType type) {
++    switch (type) {
++      case ASSIGN:
++        return TransitionType.ASSIGN;
++      case UNASSIGN:
++        return TransitionType.UNASSIGN;
++      case MOVE:
++        return TransitionType.MOVE;
++      case REOPEN:
++        return TransitionType.REOPEN;
++      default:
++        throw new IllegalArgumentException("Unknown RegionTransitionType: " + type);
++    }
++  }
++
++  private static RegionTransitionType convert(TransitionType type) {
++    switch (type) {
++      case ASSIGN:
++        return RegionTransitionType.ASSIGN;
++      case UNASSIGN:
++        return RegionTransitionType.UNASSIGN;
++      case MOVE:
++        return RegionTransitionType.MOVE;
++      case REOPEN:
++        return RegionTransitionType.REOPEN;
++      default:
++        throw new IllegalArgumentException("Unknown TransitionType: " + type);
++    }
++  }
++
+   @Override
+   protected void serializeStateData(ProcedureStateSerializer serializer) throws IOException {
+     super.serializeStateData(serializer);
+     RegionStateTransitionStateData.Builder builder = RegionStateTransitionStateData.newBuilder()
+-      .setInitialState(initialState).setLastState(lastState).setForceNewPlan(forceNewPlan);
++      .setType(convert(type)).setForceNewPlan(forceNewPlan);
+     if (assignCandidate != null) {
+       builder.setAssignCandidate(ProtobufUtil.toServerName(assignCandidate));
+     }
+@@ -564,8 +616,8 @@ public class TransitRegionStateProcedure
+     super.deserializeStateData(serializer);
+     RegionStateTransitionStateData data =
+       serializer.deserialize(RegionStateTransitionStateData.class);
+-    initialState = data.getInitialState();
+-    lastState = data.getLastState();
++    type = convert(data.getType());
++    setInitalAndLastState();
+     forceNewPlan = data.getForceNewPlan();
+     if (data.hasAssignCandidate()) {
+       assignCandidate = ProtobufUtil.toServerName(data.getAssignCandidate());
+@@ -574,11 +626,18 @@ public class TransitRegionStateProcedure
+ 
+   @Override
+   protected ProcedureMetrics getProcedureMetrics(MasterProcedureEnv env) {
+-    // TODO: need to reimplement the metrics system for assign/unassign
+-    if (initialState == RegionStateTransitionState.REGION_STATE_TRANSITION_GET_ASSIGN_CANDIDATE) {
+-      return env.getAssignmentManager().getAssignmentManagerMetrics().getAssignProcMetrics();
+-    } else {
+-      return env.getAssignmentManager().getAssignmentManagerMetrics().getUnassignProcMetrics();
++    MetricsAssignmentManager metrics = env.getAssignmentManager().getAssignmentManagerMetrics();
++    switch (type) {
++      case ASSIGN:
++        return metrics.getAssignProcMetrics();
++      case UNASSIGN:
++        return metrics.getUnassignProcMetrics();
++      case MOVE:
++        return metrics.getMoveProcMetrics();
++      case REOPEN:
++        return metrics.getReopenProcMetrics();
++      default:
++        throw new IllegalArgumentException("Unknown transition type: " + type);
+     }
+   }
+ 
+@@ -600,36 +659,32 @@ public class TransitRegionStateProcedure
+     return proc;
+   }
+ 
++  public enum TransitionType {
++    ASSIGN, UNASSIGN, MOVE, REOPEN
++  }
++
+   // Be careful that, when you call these 4 methods below, you need to manually attach the returned
+   // procedure with the RegionStateNode, otherwise the procedure will quit immediately without doing
+   // anything. See the comment in executeFromState to find out why we need this assumption.
+   public static TransitRegionStateProcedure assign(MasterProcedureEnv env, RegionInfo region,
+       @Nullable ServerName targetServer) {
+     return setOwner(env,
+-      new TransitRegionStateProcedure(env, region, targetServer, false,
+-        RegionStateTransitionState.REGION_STATE_TRANSITION_GET_ASSIGN_CANDIDATE,
+-        RegionStateTransitionState.REGION_STATE_TRANSITION_CONFIRM_OPENED));
++      new TransitRegionStateProcedure(env, region, targetServer, false, TransitionType.ASSIGN));
+   }
+ 
+   public static TransitRegionStateProcedure unassign(MasterProcedureEnv env, RegionInfo region) {
+     return setOwner(env,
+-      new TransitRegionStateProcedure(env, region, null, false,
+-        RegionStateTransitionState.REGION_STATE_TRANSITION_CLOSE,
+-        RegionStateTransitionState.REGION_STATE_TRANSITION_CONFIRM_CLOSED));
++      new TransitRegionStateProcedure(env, region, null, false, TransitionType.UNASSIGN));
+   }
+ 
+   public static TransitRegionStateProcedure reopen(MasterProcedureEnv env, RegionInfo region) {
+     return setOwner(env,
+-      new TransitRegionStateProcedure(env, region, null, false,
+-        RegionStateTransitionState.REGION_STATE_TRANSITION_CLOSE,
+-        RegionStateTransitionState.REGION_STATE_TRANSITION_CONFIRM_OPENED));
++      new TransitRegionStateProcedure(env, region, null, false, TransitionType.REOPEN));
+   }
+ 
+   public static TransitRegionStateProcedure move(MasterProcedureEnv env, RegionInfo region,
+       @Nullable ServerName targetServer) {
+-    return setOwner(env,
+-      new TransitRegionStateProcedure(env, region, targetServer, targetServer == null,
+-        RegionStateTransitionState.REGION_STATE_TRANSITION_CLOSE,
+-        RegionStateTransitionState.REGION_STATE_TRANSITION_CONFIRM_OPENED));
++    return setOwner(env, new TransitRegionStateProcedure(env, region, targetServer,
++      targetServer == null, TransitionType.MOVE));
+   }
+ }
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/master/assignment/TestAssignmentManager.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/master/assignment/TestAssignmentManager.java
+index 4f0e2a9863..6a08070029 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/master/assignment/TestAssignmentManager.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/master/assignment/TestAssignmentManager.java
+@@ -239,4 +239,48 @@ public class TestAssignmentManager extends TestAssignmentManagerBase {
+     // set it back as default, see setUpMeta()
+     am.wakeMetaLoadedEvent();
+   }
++
++  private void assertCloseThenOpen() {
++    assertEquals(closeSubmittedCount + 1, closeProcMetrics.getSubmittedCounter().getCount());
++    assertEquals(closeFailedCount, closeProcMetrics.getFailedCounter().getCount());
++    assertEquals(openSubmittedCount + 1, openProcMetrics.getSubmittedCounter().getCount());
++    assertEquals(openFailedCount, openProcMetrics.getFailedCounter().getCount());
++  }
++
++  @Test
++  public void testMove() throws Exception {
++    TableName tableName = TableName.valueOf("testMove");
++    RegionInfo hri = createRegionInfo(tableName, 1);
++    rsDispatcher.setMockRsExecutor(new GoodRsExecutor());
++    am.assign(hri);
++
++    // collect AM metrics before test
++    collectAssignmentManagerMetrics();
++
++    am.move(hri);
++
++    assertEquals(moveSubmittedCount + 1, moveProcMetrics.getSubmittedCounter().getCount());
++    assertEquals(moveFailedCount, moveProcMetrics.getFailedCounter().getCount());
++    assertCloseThenOpen();
++  }
++
++  @Test
++  public void testReopen() throws Exception {
++    TableName tableName = TableName.valueOf("testReopen");
++    RegionInfo hri = createRegionInfo(tableName, 1);
++    rsDispatcher.setMockRsExecutor(new GoodRsExecutor());
++    am.assign(hri);
++
++    // collect AM metrics before test
++    collectAssignmentManagerMetrics();
++
++    TransitRegionStateProcedure proc =
++      TransitRegionStateProcedure.reopen(master.getMasterProcedureExecutor().getEnvironment(), hri);
++    am.getRegionStates().getRegionStateNode(hri).setProcedure(proc);
++    waitOnFuture(submitProcedure(proc));
++
++    assertEquals(reopenSubmittedCount + 1, reopenProcMetrics.getSubmittedCounter().getCount());
++    assertEquals(reopenFailedCount, reopenProcMetrics.getFailedCounter().getCount());
++    assertCloseThenOpen();
++  }
+ }
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/master/assignment/TestAssignmentManagerBase.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/master/assignment/TestAssignmentManagerBase.java
+index 6a88d6ba85..fb6668acb8 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/master/assignment/TestAssignmentManagerBase.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/master/assignment/TestAssignmentManagerBase.java
+@@ -112,11 +112,23 @@ public abstract class TestAssignmentManagerBase {
+ 
+   protected ProcedureMetrics assignProcMetrics;
+   protected ProcedureMetrics unassignProcMetrics;
++  protected ProcedureMetrics moveProcMetrics;
++  protected ProcedureMetrics reopenProcMetrics;
++  protected ProcedureMetrics openProcMetrics;
++  protected ProcedureMetrics closeProcMetrics;
+ 
+   protected long assignSubmittedCount = 0;
+   protected long assignFailedCount = 0;
+   protected long unassignSubmittedCount = 0;
+   protected long unassignFailedCount = 0;
++  protected long moveSubmittedCount = 0;
++  protected long moveFailedCount = 0;
++  protected long reopenSubmittedCount = 0;
++  protected long reopenFailedCount = 0;
++  protected long openSubmittedCount = 0;
++  protected long openFailedCount = 0;
++  protected long closeSubmittedCount = 0;
++  protected long closeFailedCount = 0;
+ 
+   protected int newRsAdded;
+ 
+@@ -147,6 +159,10 @@ public abstract class TestAssignmentManagerBase {
+     am = master.getAssignmentManager();
+     assignProcMetrics = am.getAssignmentManagerMetrics().getAssignProcMetrics();
+     unassignProcMetrics = am.getAssignmentManagerMetrics().getUnassignProcMetrics();
++    moveProcMetrics = am.getAssignmentManagerMetrics().getMoveProcMetrics();
++    reopenProcMetrics = am.getAssignmentManagerMetrics().getReopenProcMetrics();
++    openProcMetrics = am.getAssignmentManagerMetrics().getOpenProcMetrics();
++    closeProcMetrics = am.getAssignmentManagerMetrics().getCloseProcMetrics();
+     setUpMeta();
+   }
+ 
+@@ -654,10 +670,18 @@ public abstract class TestAssignmentManagerBase {
+     }
+   }
+ 
+-  protected void collectAssignmentManagerMetrics() {
++  protected final void collectAssignmentManagerMetrics() {
+     assignSubmittedCount = assignProcMetrics.getSubmittedCounter().getCount();
+     assignFailedCount = assignProcMetrics.getFailedCounter().getCount();
+     unassignSubmittedCount = unassignProcMetrics.getSubmittedCounter().getCount();
+     unassignFailedCount = unassignProcMetrics.getFailedCounter().getCount();
++    moveSubmittedCount = moveProcMetrics.getSubmittedCounter().getCount();
++    moveFailedCount = moveProcMetrics.getFailedCounter().getCount();
++    reopenSubmittedCount = reopenProcMetrics.getSubmittedCounter().getCount();
++    reopenFailedCount = reopenProcMetrics.getFailedCounter().getCount();
++    openSubmittedCount = openProcMetrics.getSubmittedCounter().getCount();
++    openFailedCount = openProcMetrics.getFailedCounter().getCount();
++    closeSubmittedCount = closeProcMetrics.getSubmittedCounter().getCount();
++    closeFailedCount = closeProcMetrics.getFailedCounter().getCount();
+   }
+ }
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/master/assignment/TestRegionBypass.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/master/assignment/TestRegionBypass.java
+index 97dc37bc53..8f1599708a 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/master/assignment/TestRegionBypass.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/master/assignment/TestRegionBypass.java
+@@ -25,13 +25,13 @@ import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.List;
+ import java.util.concurrent.CountDownLatch;
+-
+ import org.apache.hadoop.hbase.HBaseClassTestRule;
+ import org.apache.hadoop.hbase.HBaseTestingUtility;
+ import org.apache.hadoop.hbase.ServerName;
+ import org.apache.hadoop.hbase.TableName;
+ import org.apache.hadoop.hbase.client.Admin;
+ import org.apache.hadoop.hbase.client.RegionInfo;
++import org.apache.hadoop.hbase.master.assignment.TransitRegionStateProcedure.TransitionType;
+ import org.apache.hadoop.hbase.master.procedure.MasterProcedureEnv;
+ import org.apache.hadoop.hbase.procedure2.Procedure;
+ import org.apache.hadoop.hbase.procedure2.ProcedureSuspendedException;
+@@ -88,7 +88,7 @@ public class TestRegionBypass {
+   }
+ 
+   @Test
+-  public void testBypass() throws IOException {
++  public void testBypass() throws IOException, InterruptedException {
+     Admin admin = TEST_UTIL.getAdmin();
+     MasterProcedureEnv env =
+         TEST_UTIL.getHBaseCluster().getMaster().getMasterProcedureExecutor().getEnvironment();
+@@ -99,14 +99,13 @@ public class TestRegionBypass {
+     List<Long> pids = new ArrayList<>(regions.size());
+     for (RegionInfo ri: regions) {
+       Procedure<MasterProcedureEnv> p = new StallingAssignProcedure(env, ri, null, false,
+-          RegionStateTransitionState.REGION_STATE_TRANSITION_GET_ASSIGN_CANDIDATE,
+-          RegionStateTransitionState.REGION_STATE_TRANSITION_CONFIRM_OPENED);
++          TransitionType.ASSIGN);
+       pids.add(TEST_UTIL.getHBaseCluster().getMaster().getMasterProcedureExecutor().
+           submitProcedure(p));
+     }
+     for (Long pid: pids) {
+       while (!TEST_UTIL.getHBaseCluster().getMaster().getMasterProcedureExecutor().isStarted(pid)) {
+-        Thread.currentThread().yield();
++        Thread.sleep(100);
+       }
+     }
+     List<Procedure<MasterProcedureEnv>> ps =
+@@ -131,7 +130,7 @@ public class TestRegionBypass {
+     }
+     while (!TEST_UTIL.getHBaseCluster().getMaster().getMasterProcedureExecutor().
+         getActiveProcIds().isEmpty()) {
+-      Thread.currentThread().yield();
++      Thread.sleep(100);
+     }
+     // Now assign with the override flag.
+     for (RegionInfo ri: regions) {
+@@ -139,7 +138,7 @@ public class TestRegionBypass {
+     }
+     while (!TEST_UTIL.getHBaseCluster().getMaster().getMasterProcedureExecutor().
+         getActiveProcIds().isEmpty()) {
+-      Thread.currentThread().yield();
++      Thread.sleep(100);
+     }
+     for (RegionInfo ri: regions) {
+       assertTrue(ri.toString(), TEST_UTIL.getMiniHBaseCluster().getMaster().getAssignmentManager().
+@@ -156,9 +155,8 @@ public class TestRegionBypass {
+     public StallingAssignProcedure(){}
+ 
+     public StallingAssignProcedure(MasterProcedureEnv env, RegionInfo hri,
+-        ServerName assignCandidate, boolean forceNewPlan, RegionStateTransitionState initialState,
+-        RegionStateTransitionState lastState) {
+-      super(env, hri, assignCandidate, forceNewPlan, initialState, lastState);
++        ServerName assignCandidate, boolean forceNewPlan, TransitionType type) {
++      super(env, hri, assignCandidate, forceNewPlan, type);
+       init(env);
+     }
+ 
+-- 
+2.17.1
+

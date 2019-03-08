@@ -1,0 +1,111 @@
+From 13f00b8f6752248ef9d843463a99bc7970c86afc Mon Sep 17 00:00:00 2001
+From: ss77892 <ssa@apache.org>
+Date: Fri, 1 Jun 2018 16:53:10 -0700
+Subject: TEST FOR HBASE-20657
+
+---
+ .../hadoop/hbase/master/assignment/TestAMv2.java   | 92 ++++++++++++++++++++++
+ 1 file changed, 92 insertions(+)
+ create mode 100644 hbase-server/src/test/java/org/apache/hadoop/hbase/master/assignment/TestAMv2.java
+
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/master/assignment/TestAMv2.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/master/assignment/TestAMv2.java
+new file mode 100644
+index 0000000..19d4752
+--- /dev/null
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/master/assignment/TestAMv2.java
+@@ -0,0 +1,92 @@
++package org.apache.hadoop.hbase.master.assignment;
++
++import org.apache.hadoop.hbase.HBaseTestingUtility;
++import org.apache.hadoop.hbase.MiniHBaseCluster;
++import org.apache.hadoop.hbase.TableName;
++import org.apache.hadoop.hbase.client.*;
++import org.apache.hadoop.hbase.io.compress.Compression;
++import org.apache.hadoop.hbase.master.HMaster;
++import org.apache.hadoop.hbase.util.Bytes;
++import org.junit.Before;
++import org.junit.Test;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++import java.io.IOException;
++
++
++public class TestAMv2 {
++    private HBaseTestingUtility UTIL;
++    private MiniHBaseCluster cluster;
++    private static final Logger LOG = LoggerFactory.getLogger(TestAMv2.class);
++
++
++    @Before
++    public void setUp() throws Exception {
++        UTIL = new HBaseTestingUtility();
++        cluster = UTIL.startMiniCluster(2,1);
++
++    }
++
++    @Test
++    public void testModifyRegion() throws IOException, InterruptedException {
++        UTIL.createMultiRegionTable(TableName.valueOf("test"), Bytes.toBytes("C"),4);
++        Admin admin = UTIL.getAdmin();
++        TableDescriptor tableDescriptor = admin.getDescriptor(TableName.valueOf("test"));
++        ColumnFamilyDescriptor[] columnDescriptors = tableDescriptor.getColumnFamilies();
++
++        if (columnDescriptors == null || columnDescriptors.length == 0) {
++            return;
++        }
++
++        TableDescriptorBuilder builder = TableDescriptorBuilder.newBuilder(tableDescriptor);
++        for (ColumnFamilyDescriptor descriptor : columnDescriptors) {
++            ColumnFamilyDescriptorBuilder cfd = ColumnFamilyDescriptorBuilder.newBuilder(descriptor);
++            cfd.setCompactionCompressionType(Compression.Algorithm.GZ);
++            builder.modifyColumnFamily(cfd.build());
++        }
++        TableDescriptorBuilder builder2 = TableDescriptorBuilder.newBuilder(tableDescriptor);
++        for (ColumnFamilyDescriptor descriptor : columnDescriptors) {
++            ColumnFamilyDescriptorBuilder cfd = ColumnFamilyDescriptorBuilder.newBuilder(descriptor);
++            cfd.setCompactionCompressionType(Compression.Algorithm.LZO);
++            builder2.modifyColumnFamily(cfd.build());
++        }
++
++//        new Thread() {
++//            @Override
++//            public void run() {
++//                super.run();
++//                try {
++//                    Thread.sleep(1000);
++//                } catch (InterruptedException e) {
++//                }
++//                LOG.debug("ABORTING MASTER");
++//                if(cluster.getMaster(0).isActiveMaster()) {
++//                    cluster.abortMaster(0);
++//                } else {
++//                    cluster.abortMaster(1);
++//                }
++//            }
++//        }.start();
++//
++        new Thread() {
++            @Override
++            public void run() {
++                super.run();
++                try {
++                    Thread.sleep(1000);
++                } catch (InterruptedException e) {
++                }
++                try {
++                    admin.modifyTable(builder2.build());
++                } catch (IOException e) {
++                    e.printStackTrace();
++                }
++            }
++        }.start();
++        LOG.debug("START");
++        admin.modifyTable(builder.build());
++        Thread.sleep(2000000);
++    }
++
++}
+-- 
+2.7.4
+

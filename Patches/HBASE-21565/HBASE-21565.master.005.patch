@@ -1,0 +1,311 @@
+From 3a5fd6bda025a86853843766bf8b121c390c77d2 Mon Sep 17 00:00:00 2001
+From: Jingyun Tian <tianjy1990@gmail.com>
+Date: Thu, 13 Dec 2018 12:23:16 +0800
+Subject: [PATCH] HBASE-21565 Delete dead server from dead server list too
+ early leads to concurrent Server Crash Procedures(SCP) for a same server
+
+---
+ .../hadoop/hbase/master/RegionServerTracker.java   |  2 +
+ .../apache/hadoop/hbase/master/ServerManager.java  | 25 ++++++------
+ .../hbase/master/assignment/AssignmentManager.java | 27 +++++++++----
+ .../master/procedure/ServerCrashProcedure.java     | 16 +++-----
+ .../apache/hadoop/hbase/HBaseTestingUtility.java   |  7 +++-
+ .../hadoop/hbase/master/TestRestartCluster.java    | 46 ++++++++++++++++++++++
+ .../master/procedure/TestServerCrashProcedure.java | 39 ++++++++++++++++++
+ 7 files changed, 131 insertions(+), 31 deletions(-)
+
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/RegionServerTracker.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/RegionServerTracker.java
+index f419732..f6586a2 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/RegionServerTracker.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/RegionServerTracker.java
+@@ -128,6 +128,8 @@ public class RegionServerTracker extends ZKListener {
+     // '-SPLITTING'. Each splitting server should have a corresponding SCP. Log if not.
+     splittingServersFromWALDir.stream().filter(s -> !deadServersFromPE.contains(s)).
+       forEach(s -> LOG.error("{} has no matching ServerCrashProcedure", s));
++    liveServersFromWALDir.stream()
++        .forEach(sn -> server.getAssignmentManager().getRegionStates().getOrCreateServer(sn));
+     watcher.registerListener(this);
+     synchronized (this) {
+       List<String> servers =
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/ServerManager.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/ServerManager.java
+index dc76d72..86d72d1 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/ServerManager.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/ServerManager.java
+@@ -602,19 +602,22 @@ public class ServerManager {
+       return false;
+     }
+     LOG.info("Processing expiration of " + serverName + " on " + this.master.getServerName());
+-    master.getAssignmentManager().submitServerCrash(serverName, true);
+-
+-    // Tell our listeners that a server was removed
+-    if (!this.listeners.isEmpty()) {
+-      for (ServerListener listener : this.listeners) {
+-        listener.serverRemoved(serverName);
++    long pid = master.getAssignmentManager().submitServerCrash(serverName, true);
++    if(pid <= 0) {
++      return false;
++    } else {
++      // Tell our listeners that a server was removed
++      if (!this.listeners.isEmpty()) {
++        for (ServerListener listener : this.listeners) {
++          listener.serverRemoved(serverName);
++        }
+       }
++      // trigger a persist of flushedSeqId
++      if (flushedSeqIdFlusher != null) {
++        flushedSeqIdFlusher.triggerNow();
++      }
++      return true;
+     }
+-    // trigger a persist of flushedSeqId
+-    if (flushedSeqIdFlusher != null) {
+-      flushedSeqIdFlusher.triggerNow();
+-    }
+-    return true;
+   }
+ 
+   @VisibleForTesting
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/assignment/AssignmentManager.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/assignment/AssignmentManager.java
+index a564ea9..f3e8fe5 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/assignment/AssignmentManager.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/assignment/AssignmentManager.java
+@@ -1343,24 +1343,35 @@ public class AssignmentManager {
+   public long submitServerCrash(ServerName serverName, boolean shouldSplitWal) {
+     boolean carryingMeta;
+     long pid;
+-    ServerStateNode serverNode = regionStates.getOrCreateServer(serverName);
++    ServerStateNode serverNode = regionStates.getServerNode(serverName);
++    if(serverNode == null){
++      LOG.info("Skip to add SCP for {} since this server should be OFFLINE already", serverName);
++      return -1;
++    }
+     // we hold the write lock here for fencing on reportRegionStateTransition. Once we set the
+     // server state to CRASHED, we will no longer accept the reportRegionStateTransition call from
+     // this server. This is used to simplify the implementation for TRSP and SCP, where we can make
+     // sure that, the region list fetched by SCP will not be changed any more.
+     serverNode.writeLock().lock();
+     try {
+-      serverNode.setState(ServerState.CRASHED);
+-      carryingMeta = isCarryingMeta(serverName);
+       ProcedureExecutor<MasterProcedureEnv> procExec = this.master.getMasterProcedureExecutor();
+-      pid = procExec.submitProcedure(new ServerCrashProcedure(procExec.getEnvironment(), serverName,
+-        shouldSplitWal, carryingMeta));
++      carryingMeta = isCarryingMeta(serverName);
++      if (!serverNode.isInState(ServerState.ONLINE)) {
++        LOG.info(
++          "Skip to add SCP for {} with meta= {}, since there should be a SCP is processing or already done for this server node",
++          serverName, carryingMeta);
++        return -1;
++      } else {
++        serverNode.setState(ServerState.CRASHED);
++        pid = procExec.submitProcedure(new ServerCrashProcedure(procExec.getEnvironment(),
++            serverName, shouldSplitWal, carryingMeta));
++        LOG.info(
++          "Added {} to dead servers which carryingMeta={}, submitted ServerCrashProcedure pid={}",
++          serverName, carryingMeta, pid);
++      }
+     } finally {
+       serverNode.writeLock().unlock();
+     }
+-    LOG.info(
+-      "Added {} to dead servers which carryingMeta={}, submitted ServerCrashProcedure pid={}",
+-      serverName, carryingMeta, pid);
+     return pid;
+   }
+ 
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/procedure/ServerCrashProcedure.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/procedure/ServerCrashProcedure.java
+index b93f8fa..05bcd28 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/procedure/ServerCrashProcedure.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/procedure/ServerCrashProcedure.java
+@@ -333,17 +333,6 @@ public class ServerCrashProcedure
+     return ServerOperationType.CRASH_HANDLER;
+   }
+ 
+-  /**
+-   * For this procedure, yield at end of each successful flow step so that all crashed servers
+-   * can make progress rather than do the default which has each procedure running to completion
+-   * before we move to the next. For crashed servers, especially if running with distributed log
+-   * replay, we will want all servers to come along; we do not want the scenario where a server is
+-   * stuck waiting for regions to online so it can replay edits.
+-   */
+-  @Override
+-  protected boolean isYieldBeforeExecuteFromState(MasterProcedureEnv env, ServerCrashState state) {
+-    return true;
+-  }
+ 
+   @Override
+   protected boolean shouldWaitClientAck(MasterProcedureEnv env) {
+@@ -390,4 +379,9 @@ public class ServerCrashProcedure
+   protected ProcedureMetrics getProcedureMetrics(MasterProcedureEnv env) {
+     return env.getMasterServices().getMasterMetrics().getServerCrashProcMetrics();
+   }
++
++  @Override
++  protected boolean holdLock(MasterProcedureEnv env) {
++    return true;
++  }
+ }
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/HBaseTestingUtility.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/HBaseTestingUtility.java
+index 31a7cad..bb06b68 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/HBaseTestingUtility.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/HBaseTestingUtility.java
+@@ -1185,6 +1185,11 @@ public class HBaseTestingUtility extends HBaseZKTestingUtility {
+    * @param servers number of region servers
+    */
+   public void restartHBaseCluster(int servers) throws IOException, InterruptedException {
++    this.restartHBaseCluster(servers, null);
++  }
++
++  public void restartHBaseCluster(int servers, List<Integer> ports)
++      throws IOException, InterruptedException {
+     if (hbaseAdmin != null) {
+       hbaseAdmin.close();
+       hbaseAdmin = null;
+@@ -1193,7 +1198,7 @@ public class HBaseTestingUtility extends HBaseZKTestingUtility {
+       this.connection.close();
+       this.connection = null;
+     }
+-    this.hbaseCluster = new MiniHBaseCluster(this.conf, servers);
++    this.hbaseCluster = new MiniHBaseCluster(this.conf, 1, servers, ports, null, null);
+     // Don't leave here till we've done a successful scan of the hbase:meta
+     Connection conn = ConnectionFactory.createConnection(this.conf);
+     Table t = conn.getTable(TableName.META_TABLE_NAME);
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/master/TestRestartCluster.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/master/TestRestartCluster.java
+index 4ba1876..079d5ae 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/master/TestRestartCluster.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/master/TestRestartCluster.java
+@@ -24,6 +24,8 @@ import static org.junit.Assert.assertTrue;
+ import java.io.IOException;
+ import java.util.List;
+ import java.util.Map;
++import java.util.stream.Collectors;
++
+ import org.apache.hadoop.hbase.HBaseClassTestRule;
+ import org.apache.hadoop.hbase.HBaseTestingUtility;
+ import org.apache.hadoop.hbase.HConstants;
+@@ -33,12 +35,17 @@ import org.apache.hadoop.hbase.ServerName;
+ import org.apache.hadoop.hbase.TableExistsException;
+ import org.apache.hadoop.hbase.TableName;
+ import org.apache.hadoop.hbase.client.RegionInfo;
++import org.apache.hadoop.hbase.client.Table;
++import org.apache.hadoop.hbase.master.procedure.MasterProcedureEnv;
++import org.apache.hadoop.hbase.master.procedure.ServerCrashProcedure;
++import org.apache.hadoop.hbase.procedure2.Procedure;
+ import org.apache.hadoop.hbase.testclassification.LargeTests;
+ import org.apache.hadoop.hbase.testclassification.MasterTests;
+ import org.apache.hadoop.hbase.util.Bytes;
+ import org.apache.hadoop.hbase.util.JVMClusterUtil;
+ import org.apache.hadoop.hbase.util.Threads;
+ import org.junit.After;
++import org.junit.Assert;
+ import org.junit.ClassRule;
+ import org.junit.Test;
+ import org.junit.experimental.categories.Category;
+@@ -67,6 +74,45 @@ public class TestRestartCluster {
+   }
+ 
+   @Test
++  public void testClusterRestartFailOver() throws Exception {
++    UTIL.startMiniCluster(3);
++    UTIL.waitFor(60000, () -> UTIL.getMiniHBaseCluster().getMaster().isInitialized());
++    TableName tableName = TABLES[0];
++    ServerName testServer = UTIL.getHBaseCluster().getRegionServer(0).getServerName();
++    UTIL.createMultiRegionTable(tableName, FAMILY);
++    UTIL.waitTableEnabled(tableName);
++    Table table = UTIL.getConnection().getTable(tableName);
++    for (int i = 0; i < 100; i++) {
++      UTIL.loadTable(table, FAMILY);
++    }
++    List<Integer> ports =
++        UTIL.getHBaseCluster().getMaster().getServerManager().getOnlineServersList().stream()
++            .map(serverName -> serverName.getPort()).collect(Collectors.toList());
++    LOG.info("Shutting down cluster");
++    UTIL.getHBaseCluster().killAll();
++    UTIL.getHBaseCluster().waitUntilShutDown();
++    LOG.info("Starting cluster the second time");
++    UTIL.restartHBaseCluster(3, ports);
++    UTIL.waitFor(10000, () -> UTIL.getHBaseCluster().getMaster().isInitialized());
++    LOG.info("start to find the procedure of SCP for the severName we choose");
++    UTIL.waitFor(20000,
++      () -> UTIL.getHBaseCluster().getMaster().getProcedures().stream()
++          .anyMatch(procedure -> (procedure instanceof ServerCrashProcedure)
++              && ((ServerCrashProcedure) procedure).getServerName().equals(testServer)));
++    LOG.info("start to submit the SCP for the same serverName {} which should fail", testServer);
++    Assert.assertFalse(
++      UTIL.getHBaseCluster().getMaster().getServerManager().expireServer(testServer));
++    Procedure procedure = UTIL.getHBaseCluster().getMaster().getProcedures().stream()
++        .filter(p -> (p instanceof ServerCrashProcedure)
++            && ((ServerCrashProcedure) p).getServerName().equals(testServer))
++        .findAny().get();
++    UTIL.waitFor(20000, () -> procedure.isFinished());
++    LOG.info("even when the SCP is finished, the duplicate SCP should not be scheduled for {}", testServer);
++    Assert.assertFalse(
++        UTIL.getHBaseCluster().getMaster().getServerManager().expireServer(testServer));
++  }
++
++  @Test
+   public void testClusterRestart() throws Exception {
+     UTIL.startMiniCluster(3);
+     while (!UTIL.getMiniHBaseCluster().getMaster().isInitialized()) {
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/master/procedure/TestServerCrashProcedure.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/master/procedure/TestServerCrashProcedure.java
+index 0e4a84b..51bde97 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/master/procedure/TestServerCrashProcedure.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/master/procedure/TestServerCrashProcedure.java
+@@ -33,9 +33,11 @@ import org.apache.hadoop.hbase.client.RegionInfo;
+ import org.apache.hadoop.hbase.client.Table;
+ import org.apache.hadoop.hbase.master.HMaster;
+ import org.apache.hadoop.hbase.master.assignment.AssignmentTestingUtil;
++import org.apache.hadoop.hbase.procedure2.Procedure;
+ import org.apache.hadoop.hbase.procedure2.ProcedureExecutor;
+ import org.apache.hadoop.hbase.procedure2.ProcedureMetrics;
+ import org.apache.hadoop.hbase.procedure2.ProcedureTestingUtility;
++import org.apache.hadoop.hbase.regionserver.HRegionServer;
+ import org.apache.hadoop.hbase.testclassification.LargeTests;
+ import org.apache.hadoop.hbase.testclassification.MasterTests;
+ import org.junit.After;
+@@ -169,6 +171,43 @@ public class TestServerCrashProcedure {
+       throw throwable;
+     }
+   }
++  
++  @Test
++  public void testConcurrentSCPForSameServer() throws Exception {
++    final TableName tableName = TableName.valueOf("testConcurrentSCPForSameServer");
++    try (Table t = createTable(tableName)) {
++      // Load the table with a bit of data so some logs to split and some edits in each region.
++      this.util.loadTable(t, HBaseTestingUtility.COLUMNS[0]);
++      final int count = util.countRows(t);
++      assertTrue("expected some rows", count > 0);
++      // find the first server that match the request and executes the test
++      ServerName rsToKill = null;
++      for (RegionInfo hri : util.getAdmin().getRegions(tableName)) {
++        final ServerName serverName = AssignmentTestingUtil.getServerHoldingRegion(util, hri);
++        if (AssignmentTestingUtil.isServerHoldingMeta(util, serverName) == true) {
++          rsToKill = serverName;
++          break;
++        }
++      }
++      HMaster master = util.getHBaseCluster().getMaster();
++      final ProcedureExecutor<MasterProcedureEnv> pExecutor = master.getMasterProcedureExecutor();
++      ServerCrashProcedure procB =
++          new ServerCrashProcedure(pExecutor.getEnvironment(), rsToKill, false, false);
++      AssignmentTestingUtil.killRs(util, rsToKill);
++      long procId = getSCPProcId(pExecutor);
++      Procedure procA = pExecutor.getProcedure(procId);
++      LOG.info("submit SCP procedureA");
++      util.waitFor(5000, () -> procA.hasLock());
++      LOG.info("procedureA acquired the lock");
++      assertEquals(Procedure.LockState.LOCK_EVENT_WAIT,
++          procB.acquireLock(pExecutor.getEnvironment()));
++      LOG.info("procedureB should not be able to get the lock");
++      util.waitFor(60000,
++          () -> procB.acquireLock(pExecutor.getEnvironment()) == Procedure.LockState.LOCK_ACQUIRED);
++      LOG.info("when procedure B get the lock, procedure A should be finished");
++      assertTrue(procA.isFinished());
++    }
++  }
+ 
+   protected void assertReplicaDistributed(final Table t) {
+     return;
+-- 
+2.7.4

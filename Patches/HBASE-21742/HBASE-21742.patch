@@ -1,0 +1,46 @@
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/HMaster.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
+index 132e2714e1..cc949ddebc 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/HMaster.java
+@@ -1460,6 +1460,17 @@ public class HMaster extends HRegionServer implements MasterServices {
+     }
+   }
+ 
++  @Override
++  protected void prepareForShutdown(boolean abort) {
++    // The subsequent operations may invalidate internal state of the master,
++    // so make sure we don't persist any more procedures during this time.
++    if (procedureStore != null) {
++      procedureStore.stop(abort);
++      procedureStore = null;
++    }
++    super.prepareForShutdown(abort);
++  }
++
+   @Override
+   protected void stopServiceThreads() {
+     if (masterJettyServer != null) {
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java
+index fb849f62b7..3337c5509a 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/HRegionServer.java
+@@ -1048,6 +1048,8 @@ public class HRegionServer extends HasThread implements
+       }
+     }
+ 
++    prepareForShutdown(isAborted());
++
+     if (this.leases != null) {
+       this.leases.closeAfterLeasesExpire();
+     }
+@@ -1178,6 +1180,10 @@ public class HRegionServer extends HasThread implements
+     LOG.info("Exiting; stopping=" + this.serverName + "; zookeeper connection closed.");
+   }
+ 
++  protected void prepareForShutdown(boolean abort) {
++    // A no-op for RS.
++  }
++
+   private boolean containsMetaTableRegions() {
+     return onlineRegions.containsKey(RegionInfoBuilder.FIRST_META_REGIONINFO.getEncodedName());
+   }

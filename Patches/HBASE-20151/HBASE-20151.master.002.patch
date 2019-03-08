@@ -1,0 +1,136 @@
+From c15134b5dcb0527b30813fbbef9fd45a4acb1cba Mon Sep 17 00:00:00 2001
+From: Reid Chan <reidddchan@outlook.com>
+Date: Fri, 6 Apr 2018 00:52:51 +0800
+Subject: [PATCH] HBASE-20151 Bug with SingleColumnValueFilter and FamilyFilter
+
+---
+ .../java/org/apache/hadoop/hbase/filter/FamilyFilter.java   | 11 ++++++++++-
+ .../main/java/org/apache/hadoop/hbase/filter/Filter.java    | 13 +++++++++++++
+ .../java/org/apache/hadoop/hbase/filter/FilterBase.java     |  5 +++++
+ .../java/org/apache/hadoop/hbase/filter/FilterListBase.java |  4 ++++
+ .../org/apache/hadoop/hbase/filter/FilterListWithAND.java   |  1 +
+ .../org/apache/hadoop/hbase/filter/FilterListWithOR.java    |  1 +
+ .../apache/hadoop/hbase/filter/SingleColumnValueFilter.java |  1 -
+ 7 files changed, 34 insertions(+), 2 deletions(-)
+
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FamilyFilter.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FamilyFilter.java
+index f114e98b7d..f29da6bf6f 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FamilyFilter.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FamilyFilter.java
+@@ -83,12 +83,21 @@ public class FamilyFilter extends CompareFilter {
+     int familyLength = c.getFamilyLength();
+     if (familyLength > 0) {
+       if (compareFamily(getCompareOperator(), this.comparator, c)) {
+-        return ReturnCode.NEXT_ROW;
++        return ReturnCode.NEXT_COL;
+       }
+     }
+     return ReturnCode.INCLUDE;
+   }
+ 
++  @Override
++  public ReturnCode transformReturnCode(FilterListBase.LOGIG logic, ReturnCode originRC) {
++    if (logic == FilterListBase.LOGIG.AND &&
++        originRC == ReturnCode.NEXT_COL) {
++      return ReturnCode.SKIP;
++    }
++    return originRC;
++  }
++
+   public static Filter createFilterFromArguments(ArrayList<byte []> filterArguments) {
+     ArrayList<?> arguments = CompareFilter.extractArguments(filterArguments);
+     CompareOperator compareOp = (CompareOperator)arguments.get(0);
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/Filter.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/Filter.java
+index dec8e061b5..7fb05e052e 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/Filter.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/Filter.java
+@@ -290,6 +290,19 @@ public abstract class Filter {
+    */
+   abstract public byte[] toByteArray() throws IOException;
+ 
++  /**
++   * It will be called in {@link FilterListWithAND} and {@link FilterListWithOR}. Sometimes
++   * ReturnCode of one filter may advance too fast, skipping too many cells which leads to
++   * incorrect answers of filtering. So this method is to provide a way for transforming the
++   * ReturnCode after {@link #filterCell(Cell)} called.
++   * For more details, please refer to HBASE-20151.
++   * @see <a href="https://issues.apache.org/jira/browse/HBASE-20151">HBASE-20151</a>
++   * @param logic Logic.AND or Logic.AND
++   * @param originRC ReturnCode from {@link #filterCell(Cell)}
++   * @return transformed ReturnCode
++   */
++  abstract public ReturnCode transformReturnCode(FilterListBase.LOGIG logic, ReturnCode originRC);
++
+   /**
+    * 
+    * Concrete implementers can signal a failure condition in their code by throwing an
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterBase.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterBase.java
+index 7401e4cc38..0557d34093 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterBase.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterBase.java
+@@ -170,6 +170,11 @@ public abstract class FilterBase extends Filter {
+     return new byte[0];
+   }
+ 
++  @Override
++  public ReturnCode transformReturnCode(FilterListBase.LOGIG logic, ReturnCode originRC) {
++    return originRC;
++  }
++
+   /**
+    * Default implementation so that writers of custom filters aren't forced to implement.
+    *
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListBase.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListBase.java
+index e02f7e2515..0807755004 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListBase.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListBase.java
+@@ -43,6 +43,10 @@ public abstract class FilterListBase extends FilterBase {
+    */
+   protected ArrayList<Boolean> subFiltersIncludedCell;
+ 
++  enum LOGIG {
++    AND, OR
++  }
++
+   public FilterListBase(List<Filter> filters) {
+     reversed = checkAndGetReversed(filters, reversed);
+     this.filters = new ArrayList<>(filters);
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListWithAND.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListWithAND.java
+index 9f2ca21b28..93ece05787 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListWithAND.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListWithAND.java
+@@ -168,6 +168,7 @@ public class FilterListWithAND extends FilterListBase {
+       }
+       ReturnCode localRC;
+       localRC = filter.filterCell(c);
++      localRC = filter.transformReturnCode(LOGIG.AND, localRC);
+       rc = mergeReturnCode(rc, localRC);
+ 
+       if (localRC == ReturnCode.SEEK_NEXT_USING_HINT) {
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListWithOR.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListWithOR.java
+index 064dd8387b..07a7d7df1b 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListWithOR.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FilterListWithOR.java
+@@ -266,6 +266,7 @@ public class FilterListWithOR extends FilterListBase {
+       }
+ 
+       ReturnCode localRC = filter.filterCell(c);
++      localRC = filter.transformReturnCode(LOGIG.OR, localRC);
+ 
+       // Update previous return code and previous cell for filter[i].
+       updatePrevFilterRCList(i, localRC);
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/SingleColumnValueFilter.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/SingleColumnValueFilter.java
+index e5c83b1d72..b377b80020 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/SingleColumnValueFilter.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/SingleColumnValueFilter.java
+@@ -254,7 +254,6 @@ public class SingleColumnValueFilter extends FilterBase {
+ 
+   @Override
+   public ReturnCode filterCell(final Cell c) {
+-    // System.out.println("REMOVE KEY=" + keyValue.toString() + ", value=" + Bytes.toString(keyValue.getValue()));
+     if (this.matchedColumn) {
+       // We already found and matched the single column, all keys now pass
+       return ReturnCode.INCLUDE;
+-- 
+2.15.0
+

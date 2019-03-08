@@ -1,0 +1,62 @@
+From ae004a5151f0678993b05a256fc923812d1eef67 Mon Sep 17 00:00:00 2001
+From: Josh Elser <elserj@apache.org>
+Date: Wed, 18 Jul 2018 17:03:31 -0400
+Subject: [PATCH] HBASE-20460 Improve off-heap docs for write path
+
+Based on original docs from Anoop. Also includes hbase-default.xml updates.
+---
+ hbase-common/src/main/resources/hbase-default.xml | 13 +++++++++++++
+ src/main/asciidoc/_chapters/architecture.adoc     | 15 ++++++++++++++-
+ 2 files changed, 27 insertions(+), 1 deletion(-)
+
+diff --git a/hbase-common/src/main/resources/hbase-default.xml b/hbase-common/src/main/resources/hbase-default.xml
+index 7983ea3916..461a8da684 100644
+--- a/hbase-common/src/main/resources/hbase-default.xml
++++ b/hbase-common/src/main/resources/hbase-default.xml
+@@ -1800,4 +1800,17 @@ possible configurations would overwhelm and obscure the important.
+     <description>Default is 5 minutes. Make it 30 seconds for tests. See
+     HBASE-19794 for some context.</description>
+   </property>
++  <property>
++    <name>hbase.hregion.memstore.mslab.chunksize</name>
++    <value>2097152</value>
++    <description>The maximum size of a chunk in the MemStoreLAB.</description>
++  </property>
++  <property>
++    <name>hbase.regionserver.offheap.global.memstore.size</name>
++    <value>0</value>
++    <description>
++      The amount of off-heap memory all MemStores in a RegionServer may use.
++      A value of 0 means that no off-heap memory will be used.
++    </description>
++  </property>
+ </configuration>
+diff --git a/src/main/asciidoc/_chapters/architecture.adoc b/src/main/asciidoc/_chapters/architecture.adoc
+index d49ed12b0e..a149f9b3a4 100644
+--- a/src/main/asciidoc/_chapters/architecture.adoc
++++ b/src/main/asciidoc/_chapters/architecture.adoc
+@@ -975,7 +975,20 @@ If you are using co processors and refer the Cells in the read results, DO NOT s
+ [[regionserver.offheap.writepath]]
+ ==== Offheap write-path
+ 
+-TODO
++In HBase 2.0.0, link:https://issues.apache.org/jira/browse/HBASE-15179[HBASE-15179] made the HBase write path to work off-heap. By default, the MemStores use
++MSLAB to avoid memory fragmentation. It creates bigger fixed sized chunks and memstore cell's data will get copied into these chunks. These chunks can be pooled
++also and from 2.0.0 the MSLAB (MemStore-local allocation buffer) pool is by default ON. Write off-heaping makes use of the MSLAB pool. It creates MSLAB chunks
++as Direct ByteBuffers and pools them. HBase defaults to using no off-heap memory for MSLAB which means that no cells are kept off-heap by default.
++`hbase.regionserver.offheap.global.memstore.size` is the configuration key which controls the amount of off-heap data whose value is the number of megabytes
++of off-heap memory that should be by MSLAB (e.g. `25` would result in 25MB of off-heap). Be sure to increase `HBASE_OFFHEAPSIZE` which will set the JVM's
++MaxDirectMemorySize property. `hbase.hregion.memstore.mslab.chunksize` controls the size of each off-heap chunk, defaulting to `2097152` (2MB).
++
++When a Cell is added to a MemStore, the bytes for that Cell are copied into these off-heap buffers and a Cell POJO will refer to this memory area.
++This can greatly reduce the on-heap occupancy of the MemStores and reduce the total heap utilization for RegionServers in a write-heavy workload. On-heap and off-heap
++memory utiliazation are tracked at multiple levels to implement low level and high level memory management. The decision to flush a MemStore
++considers both the on-heap and off-heap usage of that MemStore. At the Region level, the sum of the on-heap and off-heap usages and compares them against the region
++flush size (128MB, by default). Globally, on-heap size occupancy of all memstores are tracked as well as off-heap size. When any of these sizes breaches the lower mark
++(`hbase.regionserver.global.memstore.size.lower.limit`) or the maximum size `hbase.regionserver.global.memstore.size`), all regions are selected for forced flushes.
+ 
+ [[regionserver_splitting_implementation]]
+ === RegionServer Splitting Implementation
+-- 
+2.18.0
+

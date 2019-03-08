@@ -1,0 +1,50 @@
+{'HBASE-21934': ['HBASE-21934.branch-2.001.patch', 'HBASE-21934.branch-2.1.001.patch', 'HBASE-21934.branch-2.2.001.patch', 'HBASE-21934.master.001.patch', 'HBASE-21934.master.002.patch', 'HBASE-21934.master.003.patch', 'HBASE-21934.master.004.patch', 'HBASE-21934.master.005.patch', 'HBASE-21934.master.006.patch', 'HBASE-21934.master.007.patch', 'HBASE-21934.master.008.patch', 'HBASE-21934.master.009.patch']}
+{'HBASE-14498': ['HBASE-14498.007.patch', 'HBASE-14498.008.patch', 'HBASE-14498.009.patch', 'HBASE-14498.009.patch', 'HBASE-14498.master.001.patch', 'HBASE-14498.master.002.patch', 'HBASE-14498.patch', 'HBASE-14498-addendum.patch', 'HBASE-14498-branch-1.2.patch', 'HBASE-14498-branch-1.3.patch', 'HBASE-14498-branch-1.3-V2.patch', 'HBASE-14498-branch-1.4.patch', 'HBASE-14498-branch-1.patch', 'HBASE-14498-V2.patch', 'HBASE-14498-V3.patch', 'HBASE-14498-V4.patch', 'HBASE-14498-V5.patch', 'HBASE-14498-V6.patch', 'HBASE-14498-V6.patch']}
+{'HBASE-7386': ['HBASE-7386-bin.patch', 'HBASE-7386-bin-v2.patch', 'HBASE-7386-bin-v3.patch', 'HBASE-7386-conf.patch', 'HBASE-7386-conf-v2.patch', 'HBASE-7386-conf-v3.patch', 'HBASE-7386-master-00.patch', 'HBASE-7386-master-01.patch', 'HBASE-7386-src.patch', 'HBASE-7386-v0.patch', 'supervisordconfigs-v0.patch']}
+{'HBASE-21082': ['HBASE-21802.patch', 'HBASE-21802.patch']}
+{'HBASE-21817': ['HBASE-21817.01.patch', 'HBASE-21817.02.patch', 'HBASE-21817.03.patch', 'HBASE-21817.04.patch', 'HBASE-21817.04.patch', 'HBASE-21817.05.patch', 'HBASE-21817.patch']}
+{'HBASE-21623': ['HBASE-21623.patch']}
+{'HBASE-20993': ['HBASE-20993.001.patch', 'HBASE-20993.003.branch-1.flowchart.png', 'HBASE-20993.branch-1.002.patch', 'HBASE-20993.branch-1.003.patch', 'HBASE-20993.branch-1.004.patch', 'HBASE-20993.branch-1.005.patch', 'HBASE-20993.branch-1.006.patch', 'HBASE-20993.branch-1.007.patch', 'HBASE-20993.branch-1.008.patch', 'HBASE-20993.branch-1.009.patch', 'HBASE-20993.branch-1.009.patch', 'HBASE-20993.branch-1.010.patch', 'HBASE-20993.branch-1.011.patch', 'HBASE-20993.branch-1.012.patch', 'HBASE-20993.branch-1.2.001.patch', 'HBASE-20993.branch-1.wip.002.patch', 'HBASE-20993.branch-1.wip.patch', 'yetus-local-testpatch-output-009.txt']}
+{'HBASE-20657': ['HBASE-20657-1-branch-2.patch', 'HBASE-20657-2-branch-2.patch', 'HBASE-20657-3-branch-2.patch', 'HBASE-20657-4-master.patch', 'HBASE-20657-testcase-branch2.patch']}
+{'HBASE-16228': ['HBASE-16228.patch']}
+{'HBASE-21577': ['HBASE-21577.master.001.patch', 'HBASE-21577.master.002.patch']}
+{'HBASE-21860': ['HBASE-21860.branch-1.4.001.patch', 'HBASE-21860.branch-2.0.001.patch', 'HBASE-21860.branch-2.2.001.patch', 'HBASE-21860.master.001.patch', 'HBASE-21860.master.002.patch']}
+{'HBASE-21742': ['HBASE-21742.patch']}
+{'HBASE-21564': ['HBASE-21564.06.patch', 'HBASE-21564.master.001.patch', 'HBASE-21564.master.002.patch', 'HBASE-21564.master.003.patch', 'HBASE-21564.master.004.patch', 'HBASE-21564.master.005.patch']}
+{'HBASE-21800': ['hbase-21800.master.001.patch', 'hbase-21800.master.002.patch', 'hbase-21800.master.003.patch']}
+{'HBASE-21013': ['HBASE-21013-branch-1.4.001.patch']}
+{'HBASE-21070': ['HBASE-21070.master.001.patch', 'HBASE-21070.master.002.patch', 'HBASE-21070.master.003.patch']}
+{'HBASE-21773': ['HBASE-21773.master.001.patch', 'HBASE-21773.master.002.patch', 'HBASE-21773.master.003.patch', 'HBASE-21773.master.004.patch']}
+{'HBASE-21519': ['HBASE-21519.branch-2.patch', 'providerId_value.png']}
+{'HBASE-21565': ['HBASE-21565.branch-2.001.patch', 'HBASE-21565.branch-2.002.patch', 'HBASE-21565.master.001.patch', 'HBASE-21565.master.002.patch', 'HBASE-21565.master.003.patch', 'HBASE-21565.master.004.patch', 'HBASE-21565.master.005.patch', 'HBASE-21565.master.006.patch', 'HBASE-21565.master.007.patch', 'HBASE-21565.master.008.patch', 'HBASE-21565.master.009.patch', 'HBASE-21565.master.010.patch']}
+{'HBASE-20460': ['HBASE-20460.001.patch']}
+{'HBASE-19925': ['HBASE-19925.master.001.patch']}
+{'HBASE-20632': ['20632.v1.txt']}
+{'HBASE-18955': ['HBASE-18995.001.branch-1.1.patch']}
+{'HBASE-16138': ['HBASE-16138.patch', 'HBASE-16138-v1.patch', 'HBASE-16138-v2.patch']}
+{'HBASE-14006': ['HBASE-14006.patch']}
+{'HBASE-15165': ['HBASE-15165.001.patch', 'HBASE-15165.002.patch', 'HBASE-15165.003.patch', 'HBASE-15165.004.patch']}
+{'HBASE-15398': ['15398-test.txt', 'HBASE-15398.v1.txt', 'HBASE-15398-v2.patch', 'HBASE-15398-v3.patch', 'HBASE-15398-v4.patch', 'HBASE-15398-v5.patch', 'HBASE-15398-v6.patch']}
+{'HBASE-10017': ['HBASE-10017-r1544633.patch', 'HBASE-10017-r1544633.patch', 'patchSiteOutput.txt', 'TestHRegionServerBulkLoad-more-splits.txt', 'TestHRegionServerBulkLoad-more-splits.txt', 'TEST-org.apache.hadoop.hbase.mapreduce.IntegrationTestBulkLoad.xml.gz']}
+{'HBASE-21970': ['HBASE-21970.master.001.patch', 'HBASE-21970.master.002.patch']}
+{'HBASE-21975': ['HBASE-21975.patch']}
+{'HBASE-21487': ['HBASE-21487.branch-2.02.patch', 'HBASE-21487.branch-2.03.patch', 'HBASE-21487.branch-2.04.patch', 'HBASE-21487.branch-2.05.patch', 'HBASE-21487.branch-2.06.patch', 'HBASE-21487.branch-2.06.patch', 'HBASE-21487.branch-2.patch']}
+{'HBASE-21481': ['HBASE-21481.master.001.patch', 'HBASE-21481.master.002.patch', 'HBASE-21481.master.003.patch', 'HBASE-21481.master.004.patch', 'HBASE-21481.master.005.patch', 'HBASE-21481.master.006.patch', 'HBASE-21481.master.007.patch', 'HBASE-21481.master.008.patch', 'HBASE-21481.master.009.patch', 'HBASE-21481.master.010.patch', 'HBASE-21481.master.011.patch', 'HBASE-21481.master.012.patch', 'HBASE-21481.master.013.patch', 'HBASE-21481.master.014.patch', 'HBASE-21481.master.014.patch']}
+{'HBASE-21974': ['HBASE-21974.master.001.patch', 'HBASE-21974.master.002.patch', 'HBASE-21974.master.003.patch']}
+{'HBASE-21796': ['HBASE-21796.001.branch-1.patch', 'HBASE-21796.002.branch-1.patch', 'HBASE-21796.003.branch-1.patch', 'HBASE-21796.004.branch-1.patch', 'HBASE-21796.005.branch-1.patch']}
+{'HBASE-21920': ['HBASE-21920.branch-1.patch']}
+{'HBASE-20754': ['HBASE-20754.master.001.patch', 'HBASE-20754.patch']}
+{'HBASE-21964': ['HBASE-21964.branch-1.4.001.patch', 'unthrottleByType.patch']}
+{'HBASE-21810': ['HBASE-21810.branch-1.001.patch', 'HBASE-21810.branch-1.2.001.patch', 'HBASE-21810.branch-2.001.patch', 'HBASE-21810.master.001.patch', 'HBASE-21810.master.001.patch']}
+{'HBASE-21717': ['HBASE-21717-HBASE-21512.patch', 'HBASE-21717-HBASE-21512-v1.patch', 'HBASE-21717-HBASE-21512-v2.patch', 'HBASE-21717-HBASE-21512-v3.patch', 'HBASE-21717-HBASE-21512-v4.patch', 'HBASE-21717-HBASE-21512-v5.patch']}
+{'HBASE-21540': ['HBASE-21540-and-ut.patch']}
+{'HBASE-20516': ['20516.initial.patch.txt', '20516.initial.patch.txt']}
+{'HBASE-21454': ['HBASE-21454.master.001.patch']}
+{'HBASE-21751': ['HBASE-21751.patch', 'HBASE-21751v2.patch']}
+{'HBASE-20151': ['filter-list-type.v1.txt', 'HBASE-20151.master.001.patch', 'HBASE-20151.master.002.patch', 'HBASE-20151.master.003.patch', 'HBASE-20151.master.004.patch', 'HBASE-20151.master.004.patch', 'HBASE-20151.master.005.patch', 'HBASE-20151.master.006.patch']}
+{'HBASE-21917': ['HBASE-21917.v1.patch', 'HBASE-21917.v2.patch', 'HBASE-21917.v3.patch', 'HBASE-21917.v4.patch']}
+{'HBASE-18659': []}
+{'HBASE-9888': ['HBASE-9888.002.patch', 'HBASE-9888.003.patch', 'HBASE-9888.branch-1.001.patch', 'HBASE-9888.branch-1.002.patch', 'HBASE-9888.branch-2.002.patch', 'HBASE-9888.branch-2.patch', 'HBASE-9888.branch-2.patch', 'HBASE-9888.patch']}
+{'HBASE-21688': ['HBASE-21688-branch-2.1-v1.patch', 'HBASE-21688-branch-2.1-v2.patch', 'HBASE-21688-branch-2.2-v1.patch', 'HBASE-21688-master-addendum.patch', 'HBASE-21688-v1.patch']}
+{'HBASE-21911': ['HBASE-21911.master.001.patch', 'HBASE-21911.master.002.patch']}
+{'HBASE-21744': ['HBASE-21744.01.patch', 'HBASE-21744.02.patch', 'HBASE-21744.03.patch', 'HBASE-21744.04.patch', 'HBASE-21744.patch']}

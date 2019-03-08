@@ -1,0 +1,83 @@
+From 7158562d377d5052a71d5c974ca9d7d2997159c0 Mon Sep 17 00:00:00 2001
+From: Wellington Chevreuil <wellington.chevreuil@gmail.com>
+Date: Sun, 10 Feb 2019 09:31:41 +0000
+Subject: [PATCH] HBASE-21860 - WALFactory should switch to default provider if
+ multiwal provider is defined for meta wal (Per suggestions on HBASE-21843)
+
+Change-Id: I1af280856fd8b076e0d8748985940a756b14ab3c
+---
+ .../apache/hadoop/hbase/wal/WALFactory.java    | 18 ++++++++----------
+ .../hadoop/hbase/wal/TestWALFactory.java       | 14 +++++++++++++-
+ 2 files changed, 21 insertions(+), 11 deletions(-)
+
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/wal/WALFactory.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/wal/WALFactory.java
+index 89cf98473f..08f23d63f7 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/wal/WALFactory.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/wal/WALFactory.java
+@@ -128,7 +128,12 @@ public class WALFactory {
+   public Class<? extends WALProvider> getProviderClass(String key, String defaultValue) {
+     try {
+       Providers provider = Providers.valueOf(conf.get(key, defaultValue));
+-
++      //MultiWAL shouldn't be used for meta wals. See discusssions on HBASE-21843.
++      if (key.equals(META_WAL_PROVIDER) && provider.clazz == RegionGroupingProvider.class){
++        provider = getDefaultProvider();
++        LOG.warn("Meta WAL shouldn't use MultiWAL Provider. Replaced Meta WAL provider to: {}",
++            provider.clazz.getName());
++      }
+       // AsyncFSWALProvider is not guaranteed to work on all Hadoop versions, when it's chosen as
+       // the default and we can't use it, we want to fall back to FSHLog which we know works on
+       // all versions.
+@@ -253,17 +258,10 @@ public class WALFactory {
+       if (provider != null) {
+         return provider;
+       }
+-      Class<? extends WALProvider> clz = null;
+       if (conf.get(META_WAL_PROVIDER) == null) {
+-        try {
+-          clz = conf.getClass(WAL_PROVIDER, Providers.defaultProvider.clazz, WALProvider.class);
+-        } catch (Throwable t) {
+-          // the WAL provider should be an enum. Proceed
+-        }
+-      }
+-      if (clz == null){
+-        clz = getProviderClass(META_WAL_PROVIDER, conf.get(WAL_PROVIDER, DEFAULT_WAL_PROVIDER));
++        conf.set(META_WAL_PROVIDER, conf.get(WAL_PROVIDER, DEFAULT_WAL_PROVIDER));
+       }
++      Class<? extends WALProvider> clz = getProviderClass(META_WAL_PROVIDER, conf.get(WAL_PROVIDER, DEFAULT_WAL_PROVIDER));
+       provider = createProvider(clz, AbstractFSWALProvider.META_WAL_PROVIDER_ID);
+       if (metaProvider.compareAndSet(null, provider)) {
+         return provider;
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/wal/TestWALFactory.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/wal/TestWALFactory.java
+index 7add2d0e25..3a01055588 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/wal/TestWALFactory.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/wal/TestWALFactory.java
+@@ -691,7 +691,7 @@ public class TestWALFactory {
+     WALFactory walFactory = new WALFactory(conf, this.currentServername.toString());
+ 
+     assertEquals(WALFactory.Providers.multiwal.clazz, walFactory.getWALProvider().getClass());
+-    assertEquals(WALFactory.Providers.multiwal.clazz, walFactory.getMetaProvider().getClass());
++    assertEquals(Providers.defaultProvider.clazz, walFactory.getMetaProvider().getClass());
+   }
+ 
+   @Test
+@@ -751,4 +751,16 @@ public class TestWALFactory {
+     WALProvider metaWALProvider = walFactory.getMetaProvider();
+     assertEquals(IOTestProvider.class, metaWALProvider.getClass());
+   }
++
++  @Test
++  public void testSetMetaToMultiWALProviderGetsReplacedToDefault() throws IOException {
++    final Configuration config = new Configuration();
++    config.set(WALFactory.META_WAL_PROVIDER, Providers.multiwal.name());
++    final WALFactory walFactory = new WALFactory(config, this.currentServername.toString());
++    Class<? extends WALProvider> walProvider = walFactory.getProviderClass(
++        WALFactory.WAL_PROVIDER, Providers.filesystem.name());
++    assertEquals(Providers.filesystem.clazz, walProvider);
++    WALProvider metaWALProvider = walFactory.getMetaProvider();
++    assertEquals(Providers.defaultProvider.clazz, metaWALProvider.getClass());
++  }
+ }
+-- 
+2.17.2 (Apple Git-113)
+

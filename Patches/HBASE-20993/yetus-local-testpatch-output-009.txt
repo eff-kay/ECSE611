@@ -1,0 +1,317 @@
+â ./it-tp.sh --branch=branch-1 ~/Desktop/HBASE-20993.branch-1.009.patch.1
+/tmp/yetus.hbase ~/[redacted]
+
+*******************
+Starting test-patch
+*******************
+
+Modes:  ResetRepo  UnitTests
+Processing: /Users/[redacted]/Desktop/HBASE-20993.branch-1.009.patch.1
+Patch file /Users/[redacted]/Desktop/HBASE-20993.branch-1.009.patch.1 copied to /private/tmp/yetus.hbase/out
+
+
+============================================================================
+============================================================================
+                        Confirming git environment
+============================================================================
+============================================================================
+
+
+HEAD is now at 3c17c8391e HBASE-20890 PE filterScan seems to be stuck forever
+Removing hbase-annotations/target/
+Removing hbase-archetypes/hbase-archetype-builder/target/
+Removing hbase-archetypes/hbase-client-project/target/
+Removing hbase-archetypes/hbase-shaded-client-project/target/
+Removing hbase-archetypes/target/
+Removing hbase-assembly/target/
+Removing hbase-checkstyle/target/
+Removing hbase-client/target/
+Removing hbase-common/target/
+Removing hbase-examples/target/
+Removing hbase-external-blockcache/target/
+Removing hbase-hadoop-compat/target/
+Removing hbase-hadoop2-compat/target/
+Removing hbase-it/target/
+Removing hbase-metrics-api/target/
+Removing hbase-metrics/target/
+Removing hbase-prefix-tree/target/
+Removing hbase-procedure/target/
+Removing hbase-protocol/target/
+Removing hbase-resource-bundle/target/
+Removing hbase-rest/target/
+Removing hbase-rsgroup/target/
+Removing hbase-server/target/
+Removing hbase-shaded/hbase-shaded-check-invariants/target/
+Removing hbase-shaded/hbase-shaded-client/target/
+Removing hbase-shaded/hbase-shaded-server/target/
+Removing hbase-shaded/target/
+Removing hbase-shell/target/
+Removing hbase-testing-util/target/
+Removing hbase-thrift/target/
+Removing target/
+Switched to branch 'master'
+Your branch is up to date with 'origin/master'.
+remote: Counting objects: 101, done.
+remote: Compressing objects: 100% (30/30), done.
+remote: Total 101 (delta 41), reused 95 (delta 35), pack-reused 0
+Receiving objects: 100% (101/101), 27.20 KiB | 1.94 MiB/s, done.
+Resolving deltas: 100% (41/41), completed with 32 local objects.
+From https://github.com/apache/hbase
+   a0cbfb8ea6..cdf5cfa396  branch-2   -> origin/branch-2
+   346aa6c99f..8fd5e039e6  branch-2.0 -> origin/branch-2.0
+Already up to date.
+Current branch master is up to date.
+Switched to branch 'branch-1'
+Your branch is up to date with 'origin/branch-1'.
+HEAD is now at 3c17c8391e HBASE-20890 PE filterScan seems to be stuck forever
+Testing  patch on branch-1.
+
+
+============================================================================
+============================================================================
+                         Determining needed tests
+============================================================================
+============================================================================
+
+
+(Depending upon input size and number of plug-ins, this may take a while)
+/Users/[redacted]/yetus/precommit/test-patch.sh: line 3313: ulimit: max user processes: cannot modify limit: Invalid argument
+
+
+============================================================================
+============================================================================
+Determining Maven Dependency Order (downloading dependencies in the process)
+============================================================================
+============================================================================
+
+
+cd /private/tmp/yetus.hbase/srcdir
+mvn --batch-mode -fae -q exec:exec -Dexec.executable=pwd -Dexec.args='' > /private/tmp/yetus.hbase/out/maven-branch-dirlist-root.txt 2>&1
+Elapsed:   0m 09s
+
+
+============================================================================
+============================================================================
+                          maven install: branch-1
+============================================================================
+============================================================================
+
+
+cd /private/tmp/yetus.hbase/srcdir
+mvn --batch-mode -DHBasePatchProcess -fae clean install -DskipTests=true -Dmaven.javadoc.skip=true -Dcheckstyle.skip=true -Dfindbugs.skip=true > /private/tmp/yetus.hbase/out/branch-mvninstall-root.txt 2>&1
+Elapsed:   1m 25s
+
+
+============================================================================
+============================================================================
+                           checkstyle: branch-1
+============================================================================
+============================================================================
+
+
+cd /private/tmp/yetus.hbase/srcdir/hbase-checkstyle
+mvn --batch-mode checkstyle:checkstyle -Dcheckstyle.consoleOutput=true -DHBasePatchProcess -Ptest-patch > /private/tmp/yetus.hbase/out/maven-branch-checkstyle-hbase-checkstyle.txt 2>&1
+cd /private/tmp/yetus.hbase/srcdir/hbase-client
+mvn --batch-mode checkstyle:checkstyle -Dcheckstyle.consoleOutput=true -DHBasePatchProcess -Ptest-patch > /private/tmp/yetus.hbase/out/maven-branch-checkstyle-hbase-client.txt 2>&1
+cd /private/tmp/yetus.hbase/srcdir/hbase-server
+mvn --batch-mode checkstyle:checkstyle -Dcheckstyle.consoleOutput=true -DHBasePatchProcess -Ptest-patch > /private/tmp/yetus.hbase/out/maven-branch-checkstyle-hbase-server.txt 2>&1
+
+
+============================================================================
+============================================================================
+                         Cleaning the source tree
+============================================================================
+============================================================================
+
+
+cd /private/tmp/yetus.hbase/srcdir/hbase-checkstyle
+mvn --batch-mode -DHBasePatchProcess clean -DskipTests=true > /private/tmp/yetus.hbase/out/branch-distclean-hbase-checkstyle.txt 2>&1
+Elapsed:   0m 06s
+cd /private/tmp/yetus.hbase/srcdir/hbase-client
+mvn --batch-mode -DHBasePatchProcess clean -DskipTests=true > /private/tmp/yetus.hbase/out/branch-distclean-hbase-client.txt 2>&1
+Elapsed:   0m 07s
+cd /private/tmp/yetus.hbase/srcdir/hbase-server
+mvn --batch-mode -DHBasePatchProcess clean -DskipTests=true > /private/tmp/yetus.hbase/out/branch-distclean-hbase-server.txt 2>&1
+Elapsed:   0m 07s
+
+
+============================================================================
+============================================================================
+                        Applying patch to branch-1
+============================================================================
+============================================================================
+
+
+Applying the patch:
+Mon Aug 27 12:17:22 PDT 2018
+cd /private/tmp/yetus.hbase/srcdir
+git apply --binary -v --stat --apply -p1 /private/tmp/yetus.hbase/out/patch
+Applied patch hbase-checkstyle/src/main/resources/hbase/checkstyle-suppressions.xml cleanly.
+Applied patch hbase-client/src/main/java/org/apache/hadoop/hbase/ipc/BlockingRpcConnection.java cleanly.
+Applied patch hbase-client/src/main/java/org/apache/hadoop/hbase/ipc/FallbackDisallowedException.java cleanly.
+Applied patch hbase-client/src/main/java/org/apache/hadoop/hbase/ipc/NettyRpcConnection.java cleanly.
+Applied patch hbase-client/src/main/java/org/apache/hadoop/hbase/ipc/NettyRpcNegotiateHandler.java cleanly.
+Applied patch hbase-client/src/main/java/org/apache/hadoop/hbase/ipc/RpcConnection.java cleanly.
+Applied patch hbase-server/src/main/java/org/apache/hadoop/hbase/ipc/RpcServer.java cleanly.
+Applied patch hbase-server/src/test/java/org/apache/hadoop/hbase/ipc/TestRpcServerSlowConnectionSetup.java cleanly.
+Applied patch hbase-server/src/test/java/org/apache/hadoop/hbase/security/TestInsecureIPC.java cleanly.
+Applied patch hbase-server/src/test/java/org/apache/hadoop/hbase/security/TestSecureIPC.java cleanly.
+ .../resources/hbase/checkstyle-suppressions.xml    |    1
+ .../hadoop/hbase/ipc/BlockingRpcConnection.java    |   22 ++
+ .../hbase/ipc/FallbackDisallowedException.java     |    2
+ .../hadoop/hbase/ipc/NettyRpcConnection.java       |   34 +++
+ .../hadoop/hbase/ipc/NettyRpcNegotiateHandler.java |   93 ++++++++
+ .../org/apache/hadoop/hbase/ipc/RpcConnection.java |    2
+ .../org/apache/hadoop/hbase/ipc/RpcServer.java     |   25 +-
+ .../ipc/TestRpcServerSlowConnectionSetup.java      |    3
+ .../hadoop/hbase/security/TestInsecureIPC.java     |  221 ++++++++++++++++++++
+ .../hadoop/hbase/security/TestSecureIPC.java       |   13 +
+ 10 files changed, 391 insertions(+), 25 deletions(-)
+
+
+============================================================================
+============================================================================
+Determining Maven Dependency Order (downloading dependencies in the process)
+============================================================================
+============================================================================
+
+
+cd /private/tmp/yetus.hbase/srcdir
+mvn --batch-mode -fae -q exec:exec -Dexec.executable=pwd -Dexec.args='' > /private/tmp/yetus.hbase/out/maven-patch-dirlist-root.txt 2>&1
+Elapsed:   0m 12s
+
+
+============================================================================
+============================================================================
+                           maven install: patch
+============================================================================
+============================================================================
+
+
+cd /private/tmp/yetus.hbase/srcdir/hbase-checkstyle
+mvn --batch-mode -DHBasePatchProcess -fae clean install -DskipTests=true -Dmaven.javadoc.skip=true -Dcheckstyle.skip=true -Dfindbugs.skip=true > /private/tmp/yetus.hbase/out/patch-mvninstall-hbase-checkstyle.txt 2>&1
+Elapsed:   0m 07s
+cd /private/tmp/yetus.hbase/srcdir/hbase-client
+mvn --batch-mode -DHBasePatchProcess -fae clean install -DskipTests=true -Dmaven.javadoc.skip=true -Dcheckstyle.skip=true -Dfindbugs.skip=true > /private/tmp/yetus.hbase/out/patch-mvninstall-hbase-client.txt 2>&1
+Elapsed:   0m 17s
+cd /private/tmp/yetus.hbase/srcdir/hbase-server
+mvn --batch-mode -DHBasePatchProcess -fae clean install -DskipTests=true -Dmaven.javadoc.skip=true -Dcheckstyle.skip=true -Dfindbugs.skip=true > /private/tmp/yetus.hbase/out/patch-mvninstall-hbase-server.txt 2>&1
+Elapsed:   0m 37s
+
+
+============================================================================
+============================================================================
+                             checkstyle: patch
+============================================================================
+============================================================================
+
+
+cd /private/tmp/yetus.hbase/srcdir/hbase-checkstyle
+mvn --batch-mode checkstyle:checkstyle -Dcheckstyle.consoleOutput=true -DHBasePatchProcess -Ptest-patch > /private/tmp/yetus.hbase/out/maven-patch-checkstyle-hbase-checkstyle.txt 2>&1
+cd /private/tmp/yetus.hbase/srcdir/hbase-client
+mvn --batch-mode checkstyle:checkstyle -Dcheckstyle.consoleOutput=true -DHBasePatchProcess -Ptest-patch > /private/tmp/yetus.hbase/out/maven-patch-checkstyle-hbase-client.txt 2>&1
+cd /private/tmp/yetus.hbase/srcdir/hbase-server
+mvn --batch-mode checkstyle:checkstyle -Dcheckstyle.consoleOutput=true -DHBasePatchProcess -Ptest-patch > /private/tmp/yetus.hbase/out/maven-patch-checkstyle-hbase-server.txt 2>&1
+
+The patch passed checkstyle in hbase-checkstyle
+
+
+The patch passed checkstyle in hbase-client
+
+
+hbase-server: The patch generated 0 new + 79 unchanged - 1 fixed = 79 total (was 80)
+
+
+
+============================================================================
+============================================================================
+                          XML verification: patch
+============================================================================
+============================================================================
+
+
+
+
+============================================================================
+============================================================================
+                            Running unit tests
+============================================================================
+============================================================================
+
+
+
+The patch passed checkstyle in hbase-checkstyle
+
+
+The patch passed checkstyle in hbase-client
+
+
+hbase-server: The patch generated 0 new + 79 unchanged - 1 fixed = 79 total (was 80)
+
+
+Total Elapsed time:   6m 27s
+
+
+
++1 overall
+
+ ____                              _
+/ ___| _   _  ___ ___ ___  ___ ___| |
+\___ \| | | |/ __/ __/ _ \/ __/ __| |
+ ___) | |_| | (_| (_|  __/\__ \__ \_|
+|____/ \__,_|\___\___\___||___/___(_)
+
+
+
+| Vote |      Subsystem |  Runtime   | Comment
+============================================================================
+|      |                |            | Prechecks
+|      |                |            | branch-1 Compile Tests
+|   0  |        mvndep  |   0m 09s   | Maven dependency ordering for branch
+|  +1  |    mvninstall  |   1m 25s   | branch-1 passed
+|  +1  |    checkstyle  |   1m 34s   | branch-1 passed
+|      |                |            | Patch Compile Tests
+|   0  |        mvndep  |   0m 12s   | Maven dependency ordering for patch
+|  +1  |    mvninstall  |   1m 01s   | the patch passed
+|  +1  |    checkstyle  |   0m 08s   | The patch passed checkstyle in
+|      |                |            | hbase-checkstyle
+|  +1  |    checkstyle  |   0m 22s   | The patch passed checkstyle in
+|      |                |            | hbase-client
+|  +1  |    checkstyle  |   1m 04s   | hbase-server: The patch generated 0 new
+|      |                |            | + 79 unchanged - 1 fixed = 79 total (was
+|      |                |            | 80)
+|  +1  |           xml  |   0m 01s   | The patch has no ill-formed XML file.
+|      |                |            | Other Tests
+|  +1  |          unit  |   0m 08s   | The patch passed checkstyle in
+|      |                |            | hbase-checkstyle
+|  +1  |          unit  |   0m 22s   | The patch passed checkstyle in
+|      |                |            | hbase-client
+|  +1  |          unit  |   1m 04s   | hbase-server: The patch generated 0 new
+|      |                |            | + 79 unchanged - 1 fixed = 79 total (was
+|      |                |            | 80)
+|      |                |   6m 27s   |
+
+
+|| Subsystem || Report/Notes ||
+============================================================================
+| Optional Tests |  unit  xml  checkstyle  |
+| uname | Darwin C02TH120GTFM 17.6.0 Darwin Kernel Version 17.6.0: Tue May  8 15:22:16 PDT 2018; root:xnu-4570.61.1~1/RELEASE_X86_64 x86_64 |
+| Build tool | maven |
+| Personality | /Users/[redacted]/yetus/precommit/personality/hbase.sh |
+| git revision | branch-1 / 3c17c8391e |
+| maven | version: Apache Maven 3.5.3 (3383c37e1f9e9b3bc3df5050c29c8aff9f295297; 2018-02-24T11:49:05-08:00) |
+| modules | C: hbase-checkstyle hbase-client hbase-server U: . |
+| Powered by | Apache Yetus 0.9.0-SNAPSHOT   http://yetus.apache.org |
+
+
+============================================================================
+============================================================================
+                              Finished build.
+============================================================================
+============================================================================
+
+
+
+*******************
+Stopping test-patch
+*******************

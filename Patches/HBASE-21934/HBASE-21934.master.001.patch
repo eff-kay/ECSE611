@@ -1,0 +1,286 @@
+From ed59c65a7ae7a3612a4ba0d8f338006a4e77c1f3 Mon Sep 17 00:00:00 2001
+From: Jingyun Tian <tianjy1990@gmail.com>
+Date: Thu, 21 Feb 2019 19:25:06 +0800
+Subject: [PATCH] HBASE-21934 SplitWALProcedure get stuck during ITBLL
+
+---
+ .../procedure2/RemoteProcedureDispatcher.java |  20 +++
+ .../assignment/RegionRemoteProcedureBase.java |   1 +
+ .../procedure/SplitWALRemoteProcedure.java    |   1 +
+ .../SwitchRpcThrottleRemoteProcedure.java     |   1 +
+ .../replication/RefreshPeerProcedure.java     |   1 +
+ ...ncReplicationReplayWALRemoteProcedure.java |   1 +
+ .../master/procedure/TestRemoteProcedure.java | 143 ++++++++++++++++++
+ 7 files changed, 168 insertions(+)
+ create mode 100644 hbase-server/src/test/java/org/apache/hadoop/hbase/master/procedure/TestRemoteProcedure.java
+
+diff --git a/hbase-procedure/src/main/java/org/apache/hadoop/hbase/procedure2/RemoteProcedureDispatcher.java b/hbase-procedure/src/main/java/org/apache/hadoop/hbase/procedure2/RemoteProcedureDispatcher.java
+index 958b071404..11eb38b30f 100644
+--- a/hbase-procedure/src/main/java/org/apache/hadoop/hbase/procedure2/RemoteProcedureDispatcher.java
++++ b/hbase-procedure/src/main/java/org/apache/hadoop/hbase/procedure2/RemoteProcedureDispatcher.java
+@@ -24,6 +24,7 @@ import java.util.HashSet;
+ import java.util.List;
+ import java.util.Set;
+ import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.ConcurrentSkipListSet;
+ import java.util.concurrent.DelayQueue;
+ import java.util.concurrent.ThreadPoolExecutor;
+ import java.util.concurrent.TimeUnit;
+@@ -172,6 +173,15 @@ public abstract class RemoteProcedureDispatcher<TEnv, TRemote extends Comparable
+     }
+   }
+ 
++  public void removeFinishedOperation(final TRemote key, RemoteProcedure rp) {
++    BufferNode node = nodeMap.get(key);
++    if(node == null){
++      LOG.warn("since no node for this key {}, we can't removed the finished remote procedure", key);
++      return;
++    }
++    node.operationFinish(rp);
++  }
++
+   /**
+    * Remove a remote node
+    * @param key the node identifier
+@@ -330,6 +340,7 @@ public abstract class RemoteProcedureDispatcher<TEnv, TRemote extends Comparable
+   protected final class BufferNode extends DelayedContainerWithTimestamp<TRemote>
+       implements RemoteNode<TEnv, TRemote> {
+     private Set<RemoteProcedure> operations;
++    private Set<RemoteProcedure> dispatchedOperations = new ConcurrentSkipListSet<>();
+ 
+     protected BufferNode(final TRemote key) {
+       super(key, 0);
+@@ -358,6 +369,7 @@ public abstract class RemoteProcedureDispatcher<TEnv, TRemote extends Comparable
+     public synchronized void dispatch() {
+       if (operations != null) {
+         remoteDispatch(getKey(), operations);
++        this.dispatchedOperations.addAll(operations);
+         this.operations = null;
+       }
+     }
+@@ -367,6 +379,14 @@ public abstract class RemoteProcedureDispatcher<TEnv, TRemote extends Comparable
+         abortPendingOperations(getKey(), operations);
+         this.operations = null;
+       }
++      if (dispatchedOperations != null) {
++        abortPendingOperations(getKey(), dispatchedOperations);
++        this.dispatchedOperations.clear();
++      }
++    }
++
++    public void operationFinish(RemoteProcedure remoteProcedure){
++      this.dispatchedOperations.remove(remoteProcedure);
+     }
+ 
+     @Override
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/assignment/RegionRemoteProcedureBase.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/assignment/RegionRemoteProcedureBase.java
+index 0a47671e8b..74b34bab3a 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/assignment/RegionRemoteProcedureBase.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/assignment/RegionRemoteProcedureBase.java
+@@ -151,6 +151,7 @@ public abstract class RegionRemoteProcedureBase extends Procedure<MasterProcedur
+       throws ProcedureYieldException, ProcedureSuspendedException, InterruptedException {
+     if (dispatched) {
+       // we are done, the parent procedure will check whether we are succeeded.
++      env.getRemoteDispatcher().removeFinishedOperation(targetServer, this);
+       return null;
+     }
+     RegionStateNode regionNode = getRegionNode(env);
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/procedure/SplitWALRemoteProcedure.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/procedure/SplitWALRemoteProcedure.java
+index fb2dbd7926..532d15f676 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/procedure/SplitWALRemoteProcedure.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/procedure/SplitWALRemoteProcedure.java
+@@ -73,6 +73,7 @@ public class SplitWALRemoteProcedure extends Procedure<MasterProcedureEnv>
+       throws ProcedureYieldException, ProcedureSuspendedException, InterruptedException {
+     if (dispatched) {
+       if (success) {
++        env.getRemoteDispatcher().removeFinishedOperation(worker, this);
+         return null;
+       }
+       dispatched = false;
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/procedure/SwitchRpcThrottleRemoteProcedure.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/procedure/SwitchRpcThrottleRemoteProcedure.java
+index 9a56ddc328..303995858c 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/procedure/SwitchRpcThrottleRemoteProcedure.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/procedure/SwitchRpcThrottleRemoteProcedure.java
+@@ -64,6 +64,7 @@ public class SwitchRpcThrottleRemoteProcedure extends Procedure<MasterProcedureE
+       throws ProcedureYieldException, ProcedureSuspendedException, InterruptedException {
+     if (dispatched) {
+       if (succ) {
++        env.getRemoteDispatcher().removeFinishedOperation(targetServer, this);
+         return null;
+       }
+       dispatched = false;
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/replication/RefreshPeerProcedure.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/replication/RefreshPeerProcedure.java
+index 2f43ae9282..2c9a205975 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/replication/RefreshPeerProcedure.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/replication/RefreshPeerProcedure.java
+@@ -175,6 +175,7 @@ public class RefreshPeerProcedure extends Procedure<MasterProcedureEnv>
+       throws ProcedureYieldException, ProcedureSuspendedException, InterruptedException {
+     if (dispatched) {
+       if (succ) {
++        env.getRemoteDispatcher().removeFinishedOperation(targetServer, this);
+         return null;
+       }
+       // retry
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/replication/SyncReplicationReplayWALRemoteProcedure.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/replication/SyncReplicationReplayWALRemoteProcedure.java
+index 8e6d411ec7..ae3f9972fb 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/replication/SyncReplicationReplayWALRemoteProcedure.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/replication/SyncReplicationReplayWALRemoteProcedure.java
+@@ -152,6 +152,7 @@ public class SyncReplicationReplayWALRemoteProcedure extends Procedure<MasterPro
+       throws ProcedureYieldException, ProcedureSuspendedException, InterruptedException {
+     if (dispatched) {
+       if (succ) {
++        env.getRemoteDispatcher().removeFinishedOperation(targetServer, this);
+         return null;
+       }
+       // retry
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/master/procedure/TestRemoteProcedure.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/master/procedure/TestRemoteProcedure.java
+new file mode 100644
+index 0000000000..8ab0e84ff6
+--- /dev/null
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/master/procedure/TestRemoteProcedure.java
+@@ -0,0 +1,143 @@
++/**
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.hadoop.hbase.master.procedure;
++
++import java.io.IOException;
++import java.util.NavigableMap;
++import java.util.Set;
++import java.util.SortedSet;
++import java.util.concurrent.ConcurrentSkipListMap;
++import java.util.concurrent.Executors;
++import java.util.concurrent.Future;
++import java.util.concurrent.ScheduledExecutorService;
++
++import org.apache.hadoop.hbase.HBaseTestingUtility;
++import org.apache.hadoop.hbase.ServerName;
++import org.apache.hadoop.hbase.master.MasterServices;
++import org.apache.hadoop.hbase.master.assignment.AssignmentManager;
++import org.apache.hadoop.hbase.master.assignment.MockMasterServices;
++import org.apache.hadoop.hbase.procedure2.Procedure;
++import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos;
++import org.junit.After;
++import org.junit.Before;
++import org.junit.Rule;
++import org.junit.Test;
++import org.junit.rules.ExpectedException;
++import org.junit.rules.TestName;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++import org.apache.hbase.thirdparty.com.google.common.util.concurrent.ThreadFactoryBuilder;
++
++public class TestRemoteProcedure {
++  private static final Logger LOG = LoggerFactory.getLogger(TestRemoteProcedure.class);
++  @Rule
++  public TestName name = new TestName();
++  @Rule
++  public final ExpectedException exception = ExpectedException.none();
++  protected HBaseTestingUtility util;
++  protected MockRSProcedureDispatcher rsDispatcher;
++  protected MockMasterServices master;
++  protected AssignmentManager am;
++  protected NavigableMap<ServerName, SortedSet<byte[]>> regionsToRegionServers =
++      new ConcurrentSkipListMap<>();
++  // Simple executor to run some simple tasks.
++  protected ScheduledExecutorService executor;
++
++  @Before
++  public void setUp() throws Exception {
++    util = new HBaseTestingUtility();
++    this.executor = Executors.newSingleThreadScheduledExecutor(new ThreadFactoryBuilder()
++        .setUncaughtExceptionHandler((t, e) -> LOG.warn("Uncaught: ", e)).build());
++    master = new MockMasterServices(util.getConfiguration(), this.regionsToRegionServers);
++    rsDispatcher = new MockRSProcedureDispatcher(master);
++    rsDispatcher.setMockRsExecutor(new NoopRSExecutor());
++    master.start(2, rsDispatcher);
++    am = master.getAssignmentManager();
++    master.getServerManager().getOnlineServersList().stream()
++        .forEach(serverName -> am.getRegionStates().getOrCreateServer(serverName));
++  }
++
++  @After
++  public void tearDown() throws Exception {
++    master.stop("tearDown");
++    this.executor.shutdownNow();
++  }
++
++  @Test
++  public void testSplitWALAndCrashBeforeResponse() throws Exception {
++    ServerName worker = master.getServerManager().getOnlineServersList().get(0);
++    ServerName crashedWorker = master.getServerManager().getOnlineServersList().get(1);
++    SplitWALRemoteProcedure splitWALRemoteProcedure =
++        new SplitWALRemoteProcedure(worker, crashedWorker, "test");
++    submitProcedure(splitWALRemoteProcedure);
++    Thread.sleep(2000);
++    master.getServerManager().expireServer(worker);
++    // if remoteCallFailed is called for this procedure, this procedure should be finished.
++    util.waitFor(5000, () -> splitWALRemoteProcedure.isSuccess());
++  }
++
++  private Future<byte[]> submitProcedure(final Procedure<MasterProcedureEnv> proc) {
++    return ProcedureSyncWait.submitProcedure(master.getMasterProcedureExecutor(), proc);
++  }
++
++  protected interface MockRSExecutor {
++    AdminProtos.ExecuteProceduresResponse sendRequest(ServerName server,
++        AdminProtos.ExecuteProceduresRequest req) throws IOException;
++  }
++
++  protected class NoopRSExecutor implements MockRSExecutor {
++    @Override
++    public AdminProtos.ExecuteProceduresResponse sendRequest(ServerName server,
++        AdminProtos.ExecuteProceduresRequest req) throws IOException {
++      return AdminProtos.ExecuteProceduresResponse.getDefaultInstance();
++    }
++  }
++
++  protected class MockRSProcedureDispatcher extends RSProcedureDispatcher {
++    private MockRSExecutor mockRsExec;
++
++    public MockRSProcedureDispatcher(final MasterServices master) {
++      super(master);
++    }
++
++    public void setMockRsExecutor(final MockRSExecutor mockRsExec) {
++      this.mockRsExec = mockRsExec;
++    }
++
++    @Override
++    protected void remoteDispatch(ServerName serverName,
++        @SuppressWarnings("rawtypes") Set<RemoteProcedure> remoteProcedures) {
++      submitTask(new MockRSProcedureDispatcher.MockRemoteCall(serverName, remoteProcedures));
++    }
++
++    private class MockRemoteCall extends ExecuteProceduresRemoteCall {
++      public MockRemoteCall(final ServerName serverName,
++          @SuppressWarnings("rawtypes") final Set<RemoteProcedure> operations) {
++        super(serverName, operations);
++      }
++
++      @Override
++      protected AdminProtos.ExecuteProceduresResponse sendRequest(final ServerName serverName,
++          final AdminProtos.ExecuteProceduresRequest request) throws IOException {
++        return mockRsExec.sendRequest(serverName, request);
++      }
++    }
++  }
++}
+-- 
+2.17.1

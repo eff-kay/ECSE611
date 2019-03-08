@@ -1,0 +1,86 @@
+Index: hbase-server/src/test/java/org/apache/hadoop/hbase/mapreduce/TestHRegionPartitioner.java
+===================================================================
+--- hbase-server/src/test/java/org/apache/hadoop/hbase/mapreduce/TestHRegionPartitioner.java	(revision 1544633)
++++ hbase-server/src/test/java/org/apache/hadoop/hbase/mapreduce/TestHRegionPartitioner.java	(working copy)
+@@ -63,4 +63,25 @@
+     assertEquals(1, partitioner.getPartition(writable, 10L, 3));
+     assertEquals(0, partitioner.getPartition(writable, 10L, 1));
+   }
+-}
+\ No newline at end of file
++
++  /**
++   * Test HRegionPartitioner on higher number of regions (32).
++   */
++  @Test (timeout=300000)
++  public void testHRegionPartitioner32Regions() throws Exception {
++
++    byte[][] families = { Bytes.toBytes("familyA"), Bytes.toBytes("familyB") };
++
++    UTIL.createTable(Bytes.toBytes("out_table2"), families, 1, Bytes.toBytes("aa"),
++        Bytes.toBytes("cc"), 32);
++
++    HRegionPartitioner<Long, Long> partitioner = new HRegionPartitioner<Long, Long>();
++    Configuration configuration = UTIL.getConfiguration();
++    configuration.set(TableOutputFormat.OUTPUT_TABLE, "out_table2");
++    partitioner.setConf(configuration);
++
++    ImmutableBytesWritable writable = new ImmutableBytesWritable(Bytes.toBytes("dd"));
++
++    assertEquals(15, partitioner.getPartition(writable, 10L, 16));
++  }
++}
+Index: hbase-server/src/main/java/org/apache/hadoop/hbase/mapreduce/HRegionPartitioner.java
+===================================================================
+--- hbase-server/src/main/java/org/apache/hadoop/hbase/mapreduce/HRegionPartitioner.java	(revision 1544633)
++++ hbase-server/src/main/java/org/apache/hadoop/hbase/mapreduce/HRegionPartitioner.java	(working copy)
+@@ -51,7 +51,7 @@
+ extends Partitioner<ImmutableBytesWritable, VALUE>
+ implements Configurable {
+ 
+-  private final Log LOG = LogFactory.getLog(TableInputFormat.class);
++  private final Log LOG = LogFactory.getLog(HRegionPartitioner.class);
+   private Configuration conf = null;
+   private HTable table;
+   private byte[][] startKeys;
+@@ -86,12 +86,7 @@
+     }
+     for (int i = 0; i < this.startKeys.length; i++){
+       if (Bytes.compareTo(region, this.startKeys[i]) == 0 ){
+-        if (i >= numPartitions-1){
+-          // cover if we have less reduces then regions.
+-          return (Integer.toString(i).hashCode()
+-              & Integer.MAX_VALUE) % numPartitions;
+-        }
+-        return i;
++        return i % numPartitions;
+       }
+     }
+     // if above fails to find start key that match we need to return something
+Index: hbase-server/src/main/java/org/apache/hadoop/hbase/mapred/HRegionPartitioner.java
+===================================================================
+--- hbase-server/src/main/java/org/apache/hadoop/hbase/mapred/HRegionPartitioner.java	(revision 1544633)
++++ hbase-server/src/main/java/org/apache/hadoop/hbase/mapred/HRegionPartitioner.java	(working copy)
+@@ -45,7 +45,7 @@
+ @InterfaceStability.Stable
+ public class HRegionPartitioner<K2,V2>
+ implements Partitioner<ImmutableBytesWritable, V2> {
+-  private final Log LOG = LogFactory.getLog(TableInputFormat.class);
++  private final Log LOG = LogFactory.getLog(HRegionPartitioner.class);
+   private HTable table;
+   private byte[][] startKeys;
+ 
+@@ -80,12 +80,7 @@
+     }
+     for (int i = 0; i < this.startKeys.length; i++){
+       if (Bytes.compareTo(region, this.startKeys[i]) == 0 ){
+-        if (i >= numPartitions-1){
+-          // cover if we have less reduces then regions.
+-          return (Integer.toString(i).hashCode()
+-              & Integer.MAX_VALUE) % numPartitions;
+-        }
+-        return i;
++        return i % numPartitions;
+       }
+     }
+     // if above fails to find start key that match we need to return something

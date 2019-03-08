@@ -1,0 +1,53 @@
+From ca25966eb30d6e996ab522c35a66edc60340b011 Mon Sep 17 00:00:00 2001
+From: chenyechao <chenyechao@gmail.com>
+Date: Wed, 30 Jan 2019 18:37:25 +0800
+Subject: [PATCH] HBASE-21810 bulkload support set hfile compression on client
+
+---
+ .../hadoop/hbase/mapreduce/HFileOutputFormat2.java | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/hbase-mapreduce/src/main/java/org/apache/hadoop/hbase/mapreduce/HFileOutputFormat2.java b/hbase-mapreduce/src/main/java/org/apache/hadoop/hbase/mapreduce/HFileOutputFormat2.java
+index 78b680e6f1..0fd20d4fe9 100644
+--- a/hbase-mapreduce/src/main/java/org/apache/hadoop/hbase/mapreduce/HFileOutputFormat2.java
++++ b/hbase-mapreduce/src/main/java/org/apache/hadoop/hbase/mapreduce/HFileOutputFormat2.java
+@@ -159,9 +159,11 @@ public class HFileOutputFormat2
+   // This constant is public since the client can modify this when setting
+   // up their conf object and thus refer to this symbol.
+   // It is present for backwards compatibility reasons. Use it only to
+-  // override the auto-detection of datablock encoding.
++  // override the auto-detection of datablock encoding and compression.
+   public static final String DATABLOCK_ENCODING_OVERRIDE_CONF_KEY =
+       "hbase.mapreduce.hfileoutputformat.datablock.encoding";
++  public static final String COMPRESSION_OVERRIDE_CONF_KEY =
++      "hbase.mapreduce.hfileoutputformat.compression";
+ 
+   /**
+    * Keep locality while generating HFiles for bulkload. See HBASE-12596
+@@ -209,6 +211,13 @@ public class HFileOutputFormat2
+         Compression.Algorithm.NONE.getName());
+     final Algorithm defaultCompression = HFileWriterImpl
+         .compressionByName(defaultCompressionStr);
++    String compressionStr = conf.get(COMPRESSION_OVERRIDE_CONF_KEY);
++    final Algorithm overriddenCompression;
++    if (compressionStr != null) {
++      overriddenCompression = Compression.getCompressionAlgorithmByName(compressionStr);
++    } else {
++      overriddenCompression = null;
++    }
+     final boolean compactionExclude = conf.getBoolean(
+         "hbase.mapreduce.hfileoutputformat.compaction.exclude", false);
+ 
+@@ -383,7 +392,8 @@ public class HFileOutputFormat2
+                   new Path(Bytes.toString(tableName), Bytes.toString(family)));
+         }
+         WriterLength wl = new WriterLength();
+-        Algorithm compression = compressionMap.get(tableAndFamily);
++        Algorithm compression = overriddenCompression;
++        compression = compression == null ? compressionMap.get(tableAndFamily) : compression;
+         compression = compression == null ? defaultCompression : compression;
+         BloomType bloomType = bloomTypeMap.get(tableAndFamily);
+         bloomType = bloomType == null ? BloomType.NONE : bloomType;
+-- 
+2.18.0.windows.1
+

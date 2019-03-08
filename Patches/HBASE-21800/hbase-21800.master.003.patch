@@ -1,0 +1,310 @@
+From b7400f5705264d9b8081708fc1de9ab2aa2ac777 Mon Sep 17 00:00:00 2001
+From: Sakthi <sakthivel.azhaku@gmail.com>
+Date: Tue, 29 Jan 2019 11:20:45 -0800
+Subject: [PATCH] HBASE-21800: RegionServer aborted due to NPE from
+ MetaTableMetrics coprocessor
+
+Have included code refactoring in MetaTableMetrics & LossyCounting
+---
+ .../hbase/coprocessor/MetaTableMetrics.java   | 78 +++++++++----------
+ .../hadoop/hbase/util/LossyCounting.java      | 20 +----
+ .../coprocessor/TestMetaTableMetrics.java     |  4 -
+ .../hadoop/hbase/util/TestLossyCounting.java  |  4 +-
+ 4 files changed, 44 insertions(+), 62 deletions(-)
+
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/coprocessor/MetaTableMetrics.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/coprocessor/MetaTableMetrics.java
+index 3bb47ae062c1a3467423012e525007a4ef5b214a..d08bae6762c030da0842ae84182bca0c0fbeb873 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/coprocessor/MetaTableMetrics.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/coprocessor/MetaTableMetrics.java
+@@ -75,50 +75,40 @@ public class MetaTableMetrics implements RegionCoprocessor {
+     @Override
+     public void preGetOp(ObserverContext<RegionCoprocessorEnvironment> e, Get get,
+         List<Cell> results) throws IOException {
+-      if (!active || !isMetaTableOp(e)) {
+-        return;
+-      }
+-      tableMetricRegisterAndMark(e, get);
+-      clientMetricRegisterAndMark(e);
+-      regionMetricRegisterAndMark(e, get);
+-      opMetricRegisterAndMark(e, get);
+-      opWithClientMetricRegisterAndMark(e, get);
++      registerAndMarkMetrics(e, get);
+     }
+ 
+     @Override
+     public void prePut(ObserverContext<RegionCoprocessorEnvironment> e, Put put, WALEdit edit,
+         Durability durability) throws IOException {
+-      if (!active || !isMetaTableOp(e)) {
+-        return;
+-      }
+-      tableMetricRegisterAndMark(e, put);
+-      clientMetricRegisterAndMark(e);
+-      regionMetricRegisterAndMark(e, put);
+-      opMetricRegisterAndMark(e, put);
+-      opWithClientMetricRegisterAndMark(e, put);
++      registerAndMarkMetrics(e, put);
+     }
+ 
+     @Override
+     public void preDelete(ObserverContext<RegionCoprocessorEnvironment> e, Delete delete,
+         WALEdit edit, Durability durability) throws IOException {
++      registerAndMarkMetrics(e, delete);
++    }
++
++    private void registerAndMarkMetrics(ObserverContext<RegionCoprocessorEnvironment> e, Row row){
+       if (!active || !isMetaTableOp(e)) {
+         return;
+       }
+-      tableMetricRegisterAndMark(e, delete);
++      tableMetricRegisterAndMark(e, row);
+       clientMetricRegisterAndMark(e);
+-      regionMetricRegisterAndMark(e, delete);
+-      opMetricRegisterAndMark(e, delete);
+-      opWithClientMetricRegisterAndMark(e, delete);
++      regionMetricRegisterAndMark(e, row);
++      opMetricRegisterAndMark(e, row);
++      opWithClientMetricRegisterAndMark(e, row);
+     }
+ 
+     private void markMeterIfPresent(String requestMeter) {
+       if (requestMeter.isEmpty()) {
+         return;
+       }
+-      Metric metric =
+-          requestsMap.get(requestMeter).isPresent() ? requestsMap.get(requestMeter).get() : null;
+-      if (metric != null) {
+-        ((Meter) metric).mark();
++
++      if (requestsMap.containsKey(requestMeter) && requestsMap.get(requestMeter).isPresent()) {
++        Meter metric = (Meter) requestsMap.get(requestMeter).get();
++        metric.mark();
+       }
+     }
+ 
+@@ -137,7 +127,7 @@ public class MetaTableMetrics implements RegionCoprocessor {
+     /**
+      * Registers and counts lossyCount for Meters that kept by lossy counting.
+      * By using lossy count to maintain meters, at most 7 / e meters will be kept  (e is error rate)
+-     * e.g. when e is 0.02 by default, at most 50 Clients request metrics will be kept
++     * e.g. when e is 0.02 by default, at most 350 Clients request metrics will be kept
+      *      also, all kept elements have frequency higher than e * N. (N is total count)
+      * @param e Region coprocessor environment
+      * @param requestMeter meter to be registered
+@@ -202,6 +192,7 @@ public class MetaTableMetrics implements RegionCoprocessor {
+     }
+ 
+     private void clientMetricRegisterAndMark(ObserverContext<RegionCoprocessorEnvironment> e) {
++      // Mark client metric
+       String clientIP = RpcServer.getRemoteIp() != null ? RpcServer.getRemoteIp().toString() : "";
+ 
+       String clientRequestMeter = clientRequestMeterName(clientIP);
+@@ -211,37 +202,43 @@ public class MetaTableMetrics implements RegionCoprocessor {
+ 
+     private void tableMetricRegisterAndMark(ObserverContext<RegionCoprocessorEnvironment> e,
+         Row op) {
+-      // Mark the meta table meter whenever the coprocessor is called
++      // Mark table metric
+       String tableName = getTableNameFromOp(op);
+       String tableRequestMeter = tableMeterName(tableName);
+-      registerMeterIfNotPresent(e, tableRequestMeter);
+-      markMeterIfPresent(tableRequestMeter);
++      registerAndMarkMeterIfNotPresent(e, tableRequestMeter);
+     }
+ 
+     private void regionMetricRegisterAndMark(ObserverContext<RegionCoprocessorEnvironment> e,
+         Row op) {
+-      // Mark the meta table meter whenever the coprocessor is called
++      // Mark region metric
+       String regionId = getRegionIdFromOp(op);
+       String regionRequestMeter = regionMeterName(regionId);
+-      registerMeterIfNotPresent(e, regionRequestMeter);
+-      markMeterIfPresent(regionRequestMeter);
++      registerAndMarkMeterIfNotPresent(e, regionRequestMeter);
+     }
+ 
+     private void opMetricRegisterAndMark(ObserverContext<RegionCoprocessorEnvironment> e,
+         Row op) {
++      // Mark access type ["get", "put", "delete"] metric
+       String opMeterName = opMeterName(op);
+-      registerMeterIfNotPresent(e, opMeterName);
+-      markMeterIfPresent(opMeterName);
++      registerAndMarkMeterIfNotPresent(e, opMeterName);
+     }
+ 
+     private void opWithClientMetricRegisterAndMark(ObserverContext<RegionCoprocessorEnvironment> e,
+         Object op) {
++      // // Mark client + access type metric
+       String opWithClientMeterName = opWithClientMeterName(op);
+-      registerMeterIfNotPresent(e, opWithClientMeterName);
+-      markMeterIfPresent(opWithClientMeterName);
++      registerAndMarkMeterIfNotPresent(e, opWithClientMeterName);
++    }
++
++    // Helper function to register and mark meter if not present
++    private void registerAndMarkMeterIfNotPresent(ObserverContext<RegionCoprocessorEnvironment> e,
++        String name) {
++      registerMeterIfNotPresent(e, name);
++      markMeterIfPresent(name);
+     }
+ 
+     private String opWithClientMeterName(Object op) {
++      // Extract meter name containing the client IP
+       String clientIP = RpcServer.getRemoteIp() != null ? RpcServer.getRemoteIp().toString() : "";
+       if (clientIP.isEmpty()) {
+         return "";
+@@ -265,6 +262,7 @@ public class MetaTableMetrics implements RegionCoprocessor {
+     }
+ 
+     private String opMeterName(Object op) {
++      // Extract meter name containing the access type
+       MetaTableOps ops = opsNameMap.get(op.getClass());
+       String opMeterName = "";
+       switch (ops) {
+@@ -284,10 +282,12 @@ public class MetaTableMetrics implements RegionCoprocessor {
+     }
+ 
+     private String tableMeterName(String tableName) {
++      // Extract meter name containing the table name
+       return String.format("MetaTable_table_%s_request", tableName);
+     }
+ 
+     private String clientRequestMeterName(String clientIP) {
++      // Extract meter name containing the client IP
+       if (clientIP.isEmpty()) {
+         return "";
+       }
+@@ -295,6 +295,7 @@ public class MetaTableMetrics implements RegionCoprocessor {
+     }
+ 
+     private String regionMeterName(String regionId) {
++      // Extract meter name containing the region ID
+       return String.format("MetaTable_region_%s_request", regionId);
+     }
+   }
+@@ -306,18 +307,16 @@ public class MetaTableMetrics implements RegionCoprocessor {
+ 
+   @Override
+   public void start(CoprocessorEnvironment env) throws IOException {
++    observer = new ExampleRegionObserverMeta();
+     if (env instanceof RegionCoprocessorEnvironment
+         && ((RegionCoprocessorEnvironment) env).getRegionInfo().getTable() != null
+         && ((RegionCoprocessorEnvironment) env).getRegionInfo().getTable()
+           .equals(TableName.META_TABLE_NAME)) {
+       regionCoprocessorEnv = (RegionCoprocessorEnvironment) env;
+-      observer = new ExampleRegionObserverMeta();
+       requestsMap = new ConcurrentHashMap<>();
+       clientMetricsLossyCounting = new LossyCounting();
+       // only be active mode when this region holds meta table.
+       active = true;
+-    } else {
+-      observer = new ExampleRegionObserverMeta();
+     }
+   }
+ 
+@@ -325,11 +324,10 @@ public class MetaTableMetrics implements RegionCoprocessor {
+   public void stop(CoprocessorEnvironment env) throws IOException {
+     // since meta region can move around, clear stale metrics when stop.
+     if (requestsMap != null) {
++      MetricRegistry registry = regionCoprocessorEnv.getMetricRegistryForRegionServer();
+       for (String meterName : requestsMap.keySet()) {
+-        MetricRegistry registry = regionCoprocessorEnv.getMetricRegistryForRegionServer();
+         registry.remove(meterName);
+       }
+     }
+   }
+-
+ }
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/util/LossyCounting.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/util/LossyCounting.java
+index c0da303f750ef3d423702d2410ac0bb84e0530bc..839bb90acf4cb765ab5f62d99df60ba104dde9b7 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/util/LossyCounting.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/util/LossyCounting.java
+@@ -24,7 +24,6 @@ import java.util.Map;
+ import java.util.Set;
+ import java.util.concurrent.ConcurrentHashMap;
+ 
+-import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.hbase.HBaseConfiguration;
+ import org.apache.hadoop.hbase.HConstants;
+ import org.apache.yetus.audience.InterfaceAudience;
+@@ -61,27 +60,16 @@ public class LossyCounting {
+     this.bucketSize = (long) Math.ceil(1 / errorRate);
+     this.currentTerm = 1;
+     this.totalDataCount = 0;
+-    this.errorRate = errorRate;
+     this.data = new ConcurrentHashMap<>();
+     calculateCurrentTerm();
+   }
+ 
+   public LossyCounting() {
+-    Configuration conf = HBaseConfiguration.create();
+-    this.errorRate = conf.getDouble(HConstants.DEFAULT_LOSSY_COUNTING_ERROR_RATE, 0.02);
+-    this.bucketSize = (long) Math.ceil(1.0 / errorRate);
+-    this.currentTerm = 1;
+-    this.totalDataCount = 0;
+-    this.data = new ConcurrentHashMap<>();
+-    calculateCurrentTerm();
++    this(HBaseConfiguration.create().getDouble(HConstants.DEFAULT_LOSSY_COUNTING_ERROR_RATE, 0.02));
+   }
+ 
+   public Set<String> addByOne(String key) {
+-    if(data.containsKey(key)) {
+-      data.put(key, data.get(key) +1);
+-    } else {
+-      data.put(key, 1);
+-    }
++    data.put(key, data.getOrDefault(key, 0) + 1);
+     totalDataCount++;
+     calculateCurrentTerm();
+     Set<String> dataToBeSwept = new HashSet<>();
+@@ -105,7 +93,7 @@ public class LossyCounting {
+     for(String key : dataToBeSwept) {
+       data.remove(key);
+     }
+-    LOG.debug(String.format("Swept %d of elements.", dataToBeSwept.size()));
++    LOG.debug(String.format("Swept %d elements.", dataToBeSwept.size()));
+     return dataToBeSwept;
+   }
+ 
+@@ -116,7 +104,7 @@ public class LossyCounting {
+     this.currentTerm = (int) Math.ceil(1.0 * totalDataCount / bucketSize);
+   }
+ 
+-  public long getBuketSize(){
++  public long getBucketSize(){
+     return bucketSize;
+   }
+ 
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/coprocessor/TestMetaTableMetrics.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/coprocessor/TestMetaTableMetrics.java
+index 7c1c242a14687df277b6de6e374d180972c01403..bbbeb9e5273d6e474a41f455bf3ff98951f0cca9 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/coprocessor/TestMetaTableMetrics.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/coprocessor/TestMetaTableMetrics.java
+@@ -222,10 +222,6 @@ public class TestMetaTableMetrics {
+             jmxMetrics.stream().filter(metric -> metric.matches(putWithClientMetricNameRegex))
+                     .count();
+     assertEquals(5L, putWithClientMetricsCount);
+-
+-
+-
+-
+   }
+ 
+ }
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/util/TestLossyCounting.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/util/TestLossyCounting.java
+index a36574009084c01793c07c414e928776a075cdb7..11758be7f5e1c765d130ff0ca84477b0cf93727b 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/util/TestLossyCounting.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/util/TestLossyCounting.java
+@@ -39,9 +39,9 @@ public class TestLossyCounting {
+   @Test
+   public void testBucketSize() {
+     LossyCounting lossyCounting = new LossyCounting(0.01);
+-    assertEquals(100L, lossyCounting.getBuketSize());
++    assertEquals(100L, lossyCounting.getBucketSize());
+     LossyCounting lossyCounting2 = new LossyCounting();
+-    assertEquals(50L, lossyCounting2.getBuketSize());
++    assertEquals(50L, lossyCounting2.getBucketSize());
+   }
+ 
+   @Test
+-- 
+2.17.2 (Apple Git-113)
+

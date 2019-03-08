@@ -1,0 +1,32 @@
+From 759b0c34fb101a21cf10ac7c793df875a062389f Mon Sep 17 00:00:00 2001
+From: Syeda <syedaa.basha@huawei.com>
+Date: Tue, 26 Feb 2019 19:26:21 +0530
+Subject: [PATCH] HBASE-21920 Ignoring 'empty' end_key while
+ calculating end_key for new region in HBCK -fixHdfsOverlaps command can cause
+ data loss
+
+---
+ .../src/main/java/org/apache/hadoop/hbase/util/HBaseFsck.java      | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/util/HBaseFsck.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/util/HBaseFsck.java
+index d0fa17d..6cb3d20 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/util/HBaseFsck.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/util/HBaseFsck.java
+@@ -3133,7 +3133,12 @@ public class HBaseFsck extends Configured implements Closeable {
+                 .compare(hi.getStartKey(), range.getFirst()) < 0) {
+               range.setFirst(hi.getStartKey());
+             }
+-            if (RegionSplitCalculator.BYTES_COMPARATOR
++            if ((RegionSplitCalculator.BYTES_COMPARATOR
++                .compare(range.getSecond(), HConstants.EMPTY_END_ROW) == 0)
++                || (RegionSplitCalculator.BYTES_COMPARATOR.compare(hi.getEndKey(),
++                  HConstants.EMPTY_END_ROW) == 0)) {
++              range.setSecond(HConstants.EMPTY_END_ROW);
++            } else if (RegionSplitCalculator.BYTES_COMPARATOR
+                 .compare(hi.getEndKey(), range.getSecond()) > 0) {
+               range.setSecond(hi.getEndKey());
+             }
+-- 
+2.7.2.windows.1
+

@@ -1,0 +1,55 @@
+From 127bf9c5a2d8212b03a5f5798dfe6d1ded7f430f Mon Sep 17 00:00:00 2001
+From: Josh Elser <elserj@apache.org>
+Date: Fri, 6 Oct 2017 18:02:18 -0400
+Subject: [PATCH] HBASE-18995 Invalidate region location cache on
+ CallTimeoutException
+
+In the case where meta is in the process of being reassigned from it
+being on a half-dead RS (accepts RPCs, but never responds to them),
+the HBase client will be stuck polling the old location after the
+master reassigns meta.
+---
+ .../main/java/org/apache/hadoop/hbase/client/RegionServerCallable.java | 3 +++
+ .../src/main/java/org/apache/hadoop/hbase/ipc/AbstractRpcClient.java   | 3 +++
+ 2 files changed, 6 insertions(+)
+
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/client/RegionServerCallable.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/client/RegionServerCallable.java
+index 895aa53138..984c6a4b6a 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/client/RegionServerCallable.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/client/RegionServerCallable.java
+@@ -31,6 +31,7 @@ import org.apache.hadoop.hbase.HRegionLocation;
+ import org.apache.hadoop.hbase.NotServingRegionException;
+ import org.apache.hadoop.hbase.TableName;
+ import org.apache.hadoop.hbase.exceptions.RegionMovedException;
++import org.apache.hadoop.hbase.ipc.CallTimeoutException;
+ import org.apache.hadoop.hbase.protobuf.generated.ClientProtos.ClientService;
+ import org.apache.hadoop.hbase.util.Bytes;
+ 
+@@ -116,8 +117,10 @@ public abstract class RegionServerCallable<T> implements RetryingCallable<T> {
+ 
+   @Override
+   public void throwable(Throwable t, boolean retrying) {
++    LOG.trace("Handling throwable in " + getClass().getSimpleName() + ", retrying:" + retrying, t);
+     if (t instanceof SocketTimeoutException ||
+         t instanceof ConnectException ||
++        t instanceof CallTimeoutException ||
+         t instanceof RetriesExhaustedException ||
+         (location != null && getConnection().isDeadServer(location.getServerName()))) {
+       // if thrown these exceptions, we clear all the cache entries that
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/ipc/AbstractRpcClient.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/ipc/AbstractRpcClient.java
+index 62a7e38a40..be4f17154b 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/ipc/AbstractRpcClient.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/ipc/AbstractRpcClient.java
+@@ -280,6 +280,9 @@ public abstract class AbstractRpcClient implements RpcClient {
+     } else if (exception instanceof ConnectionClosingException) {
+       return (ConnectionClosingException) new ConnectionClosingException("Call to " + addr
+           + " failed on local exception: " + exception).initCause(exception);
++    } else if (exception instanceof CallTimeoutException) {
++      return (CallTimeoutException) new CallTimeoutException("Call to " + addr
++          + " failed on local exception: " + exception).initCause(exception);
+     } else {
+       return (IOException) new IOException("Call to " + addr + " failed on local exception: "
+           + exception).initCause(exception);
+-- 
+2.14.1
+

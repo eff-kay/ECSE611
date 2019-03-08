@@ -3,6 +3,7 @@ from collections import defaultdict
 import re
 from collections import namedtuple
 
+
 def fileParse(filepath):
 
     lines = open(filepath, "r")
@@ -48,5 +49,5 @@ def fileParse(filepath):
     #         else:
     #             get_files(mapID[defectNum], path)
     # pp.pprint(mapID)
-
-fileParse("log.txt")
+    
+    

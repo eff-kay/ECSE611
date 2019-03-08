@@ -1,0 +1,25 @@
+From e9d47947fe22bc811c79e9f11d1219e0a95195cf Mon Sep 17 00:00:00 2001
+From: Reid Chan <reidddchan@outlook.com>
+Date: Mon, 19 Mar 2018 01:06:00 +0800
+Subject: [PATCH] HBASE-20151 Bug with SingleColumnValueFilter and FamilyFilter
+
+---
+ .../src/main/java/org/apache/hadoop/hbase/filter/FamilyFilter.java      | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FamilyFilter.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FamilyFilter.java
+index f114e98b7d..8f6551105f 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FamilyFilter.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/filter/FamilyFilter.java
+@@ -83,7 +83,7 @@ public class FamilyFilter extends CompareFilter {
+     int familyLength = c.getFamilyLength();
+     if (familyLength > 0) {
+       if (compareFamily(getCompareOperator(), this.comparator, c)) {
+-        return ReturnCode.NEXT_ROW;
++        return ReturnCode.NEXT_COL;
+       }
+     }
+     return ReturnCode.INCLUDE;
+-- 
+2.15.0
+

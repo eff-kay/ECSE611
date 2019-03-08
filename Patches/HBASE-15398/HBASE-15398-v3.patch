@@ -1,0 +1,1938 @@
+From 645a431b809f7603003f0e79c73b2509dcb4c07b Mon Sep 17 00:00:00 2001
+From: Phil Yang <ud1937@gmail.com>
+Date: Wed, 16 Mar 2016 13:14:33 +0800
+Subject: [PATCH] HBASE-15398 Cells loss or disorder when using family
+ essential filter and partial scanning protocol
+
+---
+ .../apache/hadoop/hbase/client/ClientScanner.java  |  16 +-
+ .../org/apache/hadoop/hbase/client/Result.java     |  43 +-
+ .../apache/hadoop/hbase/protobuf/ProtobufUtil.java |   1 +
+ .../hadoop/hbase/protobuf/ResponseConverter.java   |   7 +-
+ .../hbase/protobuf/generated/ClientProtos.java     | 633 ++++++++++++++++-----
+ hbase-protocol/src/main/protobuf/Client.proto      |   7 +
+ .../apache/hadoop/hbase/regionserver/HRegion.java  | 285 ++++++----
+ .../hadoop/hbase/regionserver/RSRpcServices.java   |   6 +-
+ .../hadoop/hbase/regionserver/RegionScanner.java   |   6 +
+ .../regionserver/ReversedRegionScannerImpl.java    |  17 +-
+ .../hbase/TestPartialResultsFromClientSide.java    |  92 ++-
+ .../hbase/client/TestBlockEvictionFromClient.java  |   4 +
+ .../coprocessor/TestCoprocessorInterface.java      |   4 +
+ 13 files changed, 835 insertions(+), 286 deletions(-)
+
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/client/ClientScanner.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/client/ClientScanner.java
+index 22a56e3..f66ecac 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/client/ClientScanner.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/client/ClientScanner.java
+@@ -22,6 +22,7 @@ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.hbase.Cell;
++import org.apache.hadoop.hbase.CellComparator;
+ import org.apache.hadoop.hbase.CellUtil;
+ import org.apache.hadoop.hbase.DoNotRetryIOException;
+ import org.apache.hadoop.hbase.HBaseConfiguration;
+@@ -596,7 +597,7 @@ public abstract class ClientScanner extends AbstractClientScanner {
+       // and thus there may be more partials server side that still need to be added to the partial
+       // list before we form the complete Result
+       if (!partialResults.isEmpty() && !heartbeatMessage) {
+-        resultsToAddToCache.add(Result.createCompleteResult(partialResults));
++        resultsToAddToCache.add(Result.createCompleteResult(partialResults, getCellComparator()));
+         clearPartialResults();
+       }
+ 
+@@ -644,7 +645,6 @@ public abstract class ClientScanner extends AbstractClientScanner {
+     } else if (!partialResults.isEmpty()) {
+       for (int i = 0; i < resultsFromServer.length; i++) {
+         Result result = resultsFromServer[i];
+-
+         // This result is from the same row as the partial Results. Add it to the list of partials
+         // and check if it was the last partial Result for that row
+         if (Bytes.equals(partialResultsRow, result.getRow())) {
+@@ -653,7 +653,8 @@ public abstract class ClientScanner extends AbstractClientScanner {
+           // If the result is not a partial, it is a signal to us that it is the last Result we
+           // need to form the complete Result client-side
+           if (!result.isPartial()) {
+-            resultsToAddToCache.add(Result.createCompleteResult(partialResults));
++            resultsToAddToCache.add(Result.createCompleteResult(partialResults,
++                getCellComparator()));
+             clearPartialResults();
+           }
+         } else {
+@@ -661,7 +662,8 @@ public abstract class ClientScanner extends AbstractClientScanner {
+           // far. If our list of partials isn't empty, this is a signal to form the complete Result
+           // since the row has now changed
+           if (!partialResults.isEmpty()) {
+-            resultsToAddToCache.add(Result.createCompleteResult(partialResults));
++            resultsToAddToCache.add(Result.createCompleteResult(partialResults,
++                getCellComparator()));
+             clearPartialResults();
+           }
+ 
+@@ -783,4 +785,10 @@ public abstract class ClientScanner extends AbstractClientScanner {
+     }
+     return false;
+   }
++
++  private CellComparator getCellComparator() {
++    return this.currentRegion != null && this.currentRegion.isMetaRegion() ?
++        CellComparator.META_COMPARATOR :
++        CellComparator.COMPARATOR;
++  }
+ }
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/client/Result.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/client/Result.java
+index d2a49c2..11138b4 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/client/Result.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/client/Result.java
+@@ -24,6 +24,7 @@ import java.nio.BufferOverflowException;
+ import java.nio.ByteBuffer;
+ import java.util.ArrayList;
+ import java.util.Arrays;
++import java.util.Collections;
+ import java.util.Comparator;
+ import java.util.List;
+ import java.util.Map;
+@@ -83,6 +84,7 @@ public class Result implements CellScannable, CellScanner {
+   private Cell[] cells;
+   private Boolean exists; // if the query was just to check existence.
+   private boolean stale = false;
++  private boolean notSorted = false;
+ 
+   /**
+    * Partial results do not contain the full row's worth of cells. The result had to be returned in
+@@ -152,10 +154,16 @@ public class Result implements CellScannable, CellScanner {
+   }
+ 
+   public static Result create(List<Cell> cells, Boolean exists, boolean stale, boolean partial) {
++    return create(cells, exists, stale, partial, false);
++  }
++
++
++  public static Result create(List<Cell> cells, Boolean exists, boolean stale, boolean partial,
++      boolean notSorted) {
+     if (exists != null){
+-      return new Result(null, exists, stale, partial);
++      return new Result(null, exists, stale, partial, notSorted);
+     }
+-    return new Result(cells.toArray(new Cell[cells.size()]), null, stale, partial);
++    return new Result(cells.toArray(new Cell[cells.size()]), null, stale, partial, notSorted);
+   }
+ 
+   /**
+@@ -172,19 +180,27 @@ public class Result implements CellScannable, CellScanner {
+   }
+ 
+   public static Result create(Cell[] cells, Boolean exists, boolean stale, boolean partial) {
++    return create(cells, exists, stale, false, false);
++  }
++
++
++  public static Result create(Cell[] cells, Boolean exists, boolean stale, boolean partial,
++      boolean notSorted) {
+     if (exists != null){
+-      return new Result(null, exists, stale, partial);
++      return new Result(null, exists, stale, partial, notSorted);
+     }
+-    return new Result(cells, null, stale, partial);
++    return new Result(cells, null, stale, partial, notSorted);
+   }
+ 
+   /** Private ctor. Use {@link #create(Cell[])}. */
+-  private Result(Cell[] cells, Boolean exists, boolean stale, boolean partial) {
++  private Result(Cell[] cells, Boolean exists, boolean stale, boolean partial, boolean notSorted) {
+     this.cells = cells;
+     this.exists = exists;
+     this.stale = stale;
+     this.partial = partial;
+     this.readonly = false;
++    this.notSorted = notSorted;
++
+   }
+ 
+   /**
+@@ -788,10 +804,11 @@ public class Result implements CellScannable, CellScanner {
+    * @throws IOException A complete result cannot be formed because the results in the partial list
+    *           come from different rows
+    */
+-  public static Result createCompleteResult(List<Result> partialResults)
++  public static Result createCompleteResult(List<Result> partialResults, CellComparator comparator)
+       throws IOException {
+     List<Cell> cells = new ArrayList<Cell>();
+     boolean stale = false;
++    boolean notSorted = false;
+     byte[] prevRow = null;
+     byte[] currentRow = null;
+ 
+@@ -823,12 +840,16 @@ public class Result implements CellScannable, CellScanner {
+         }
+         prevRow = currentRow;
+         stale = stale || r.isStale();
+-        for (Cell c : r.rawCells()) {
+-          cells.add(c);
+-        }
++        notSorted = notSorted || r.isNotSorted();
++        Collections.addAll(cells, r.rawCells());
+       }
+     }
+ 
++    if(comparator != null && notSorted) {
++      // We need sort to prevent server sending disordered cells. See HBASE-15398
++      Collections.sort(cells, comparator);
++    }
++
+     return Result.create(cells, null, stale);
+   }
+ 
+@@ -908,6 +929,10 @@ public class Result implements CellScannable, CellScanner {
+     return partial;
+   }
+ 
++  public boolean isNotSorted() {
++    return notSorted;
++  }
++
+   /**
+    * Add load information about the region to the information about the result
+    * @param loadStats statistics about the current region from which this was returned
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/protobuf/ProtobufUtil.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/protobuf/ProtobufUtil.java
+index 9c71d97..d500ad4 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/protobuf/ProtobufUtil.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/protobuf/ProtobufUtil.java
+@@ -1289,6 +1289,7 @@ public final class ProtobufUtil {
+ 
+     builder.setStale(result.isStale());
+     builder.setPartial(result.isPartial());
++    builder.setShouldSortAtClient(result.isNotSorted());
+ 
+     return builder.build();
+   }
+diff --git a/hbase-client/src/main/java/org/apache/hadoop/hbase/protobuf/ResponseConverter.java b/hbase-client/src/main/java/org/apache/hadoop/hbase/protobuf/ResponseConverter.java
+index 421907d..70bc108 100644
+--- a/hbase-client/src/main/java/org/apache/hadoop/hbase/protobuf/ResponseConverter.java
++++ b/hbase-client/src/main/java/org/apache/hadoop/hbase/protobuf/ResponseConverter.java
+@@ -371,8 +371,9 @@ public final class ResponseConverter {
+         // time will be found in getCellsLength -- length here is how many Cells in the i'th Result
+         int noOfCells = response.getCellsPerResult(i);
+         boolean isPartial =
+-            response.getPartialFlagPerResultCount() > i ?
+-                response.getPartialFlagPerResult(i) : false;
++            response.getPartialFlagPerResultCount() > i && response.getPartialFlagPerResult(i);
++        boolean shouldSort = response.getShouldSortFlagPerResultCount() > i &&
++            response.getShouldSortFlagPerResult(i);
+         List<Cell> cells = new ArrayList<Cell>(noOfCells);
+         for (int j = 0; j < noOfCells; j++) {
+           try {
+@@ -395,7 +396,7 @@ public final class ResponseConverter {
+           }
+           cells.add(cellScanner.current());
+         }
+-        results[i] = Result.create(cells, null, response.getStale(), isPartial);
++        results[i] = Result.create(cells, null, response.getStale(), isPartial, shouldSort);
+       } else {
+         // Result is pure pb.
+         results[i] = ProtobufUtil.toResult(response.getResults(i));
+diff --git a/hbase-protocol/src/main/java/org/apache/hadoop/hbase/protobuf/generated/ClientProtos.java b/hbase-protocol/src/main/java/org/apache/hadoop/hbase/protobuf/generated/ClientProtos.java
+index 0a9922c..295423b 100644
+--- a/hbase-protocol/src/main/java/org/apache/hadoop/hbase/protobuf/generated/ClientProtos.java
++++ b/hbase-protocol/src/main/java/org/apache/hadoop/hbase/protobuf/generated/ClientProtos.java
+@@ -4519,6 +4519,26 @@ public final class ClientProtos {
+      * </pre>
+      */
+     boolean getPartial();
++
++    // optional bool should_sort_at_client = 6 [default = false];
++    /**
++     * <code>optional bool should_sort_at_client = 6 [default = false];</code>
++     *
++     * <pre>
++     * When using filters that have unessessial families, server may response disordered cells.
++     * Set this flag to true if we need a sort at client side. See HBASE-15398.
++     * </pre>
++     */
++    boolean hasShouldSortAtClient();
++    /**
++     * <code>optional bool should_sort_at_client = 6 [default = false];</code>
++     *
++     * <pre>
++     * When using filters that have unessessial families, server may response disordered cells.
++     * Set this flag to true if we need a sort at client side. See HBASE-15398.
++     * </pre>
++     */
++    boolean getShouldSortAtClient();
+   }
+   /**
+    * Protobuf type {@code hbase.pb.Result}
+@@ -4599,6 +4619,11 @@ public final class ClientProtos {
+               partial_ = input.readBool();
+               break;
+             }
++            case 48: {
++              bitField0_ |= 0x00000010;
++              shouldSortAtClient_ = input.readBool();
++              break;
++            }
+           }
+         }
+       } catch (com.google.protobuf.InvalidProtocolBufferException e) {
+@@ -4817,12 +4842,39 @@ public final class ClientProtos {
+       return partial_;
+     }
+ 
++    // optional bool should_sort_at_client = 6 [default = false];
++    public static final int SHOULD_SORT_AT_CLIENT_FIELD_NUMBER = 6;
++    private boolean shouldSortAtClient_;
++    /**
++     * <code>optional bool should_sort_at_client = 6 [default = false];</code>
++     *
++     * <pre>
++     * When using filters that have unessessial families, server may response disordered cells.
++     * Set this flag to true if we need a sort at client side. See HBASE-15398.
++     * </pre>
++     */
++    public boolean hasShouldSortAtClient() {
++      return ((bitField0_ & 0x00000010) == 0x00000010);
++    }
++    /**
++     * <code>optional bool should_sort_at_client = 6 [default = false];</code>
++     *
++     * <pre>
++     * When using filters that have unessessial families, server may response disordered cells.
++     * Set this flag to true if we need a sort at client side. See HBASE-15398.
++     * </pre>
++     */
++    public boolean getShouldSortAtClient() {
++      return shouldSortAtClient_;
++    }
++
+     private void initFields() {
+       cell_ = java.util.Collections.emptyList();
+       associatedCellCount_ = 0;
+       exists_ = false;
+       stale_ = false;
+       partial_ = false;
++      shouldSortAtClient_ = false;
+     }
+     private byte memoizedIsInitialized = -1;
+     public final boolean isInitialized() {
+@@ -4851,6 +4903,9 @@ public final class ClientProtos {
+       if (((bitField0_ & 0x00000008) == 0x00000008)) {
+         output.writeBool(5, partial_);
+       }
++      if (((bitField0_ & 0x00000010) == 0x00000010)) {
++        output.writeBool(6, shouldSortAtClient_);
++      }
+       getUnknownFields().writeTo(output);
+     }
+ 
+@@ -4880,6 +4935,10 @@ public final class ClientProtos {
+         size += com.google.protobuf.CodedOutputStream
+           .computeBoolSize(5, partial_);
+       }
++      if (((bitField0_ & 0x00000010) == 0x00000010)) {
++        size += com.google.protobuf.CodedOutputStream
++          .computeBoolSize(6, shouldSortAtClient_);
++      }
+       size += getUnknownFields().getSerializedSize();
+       memoizedSerializedSize = size;
+       return size;
+@@ -4925,6 +4984,11 @@ public final class ClientProtos {
+         result = result && (getPartial()
+             == other.getPartial());
+       }
++      result = result && (hasShouldSortAtClient() == other.hasShouldSortAtClient());
++      if (hasShouldSortAtClient()) {
++        result = result && (getShouldSortAtClient()
++            == other.getShouldSortAtClient());
++      }
+       result = result &&
+           getUnknownFields().equals(other.getUnknownFields());
+       return result;
+@@ -4958,6 +5022,10 @@ public final class ClientProtos {
+         hash = (37 * hash) + PARTIAL_FIELD_NUMBER;
+         hash = (53 * hash) + hashBoolean(getPartial());
+       }
++      if (hasShouldSortAtClient()) {
++        hash = (37 * hash) + SHOULD_SORT_AT_CLIENT_FIELD_NUMBER;
++        hash = (53 * hash) + hashBoolean(getShouldSortAtClient());
++      }
+       hash = (29 * hash) + getUnknownFields().hashCode();
+       memoizedHashCode = hash;
+       return hash;
+@@ -5082,6 +5150,8 @@ public final class ClientProtos {
+         bitField0_ = (bitField0_ & ~0x00000008);
+         partial_ = false;
+         bitField0_ = (bitField0_ & ~0x00000010);
++        shouldSortAtClient_ = false;
++        bitField0_ = (bitField0_ & ~0x00000020);
+         return this;
+       }
+ 
+@@ -5135,6 +5205,10 @@ public final class ClientProtos {
+           to_bitField0_ |= 0x00000008;
+         }
+         result.partial_ = partial_;
++        if (((from_bitField0_ & 0x00000020) == 0x00000020)) {
++          to_bitField0_ |= 0x00000010;
++        }
++        result.shouldSortAtClient_ = shouldSortAtClient_;
+         result.bitField0_ = to_bitField0_;
+         onBuilt();
+         return result;
+@@ -5189,6 +5263,9 @@ public final class ClientProtos {
+         if (other.hasPartial()) {
+           setPartial(other.getPartial());
+         }
++        if (other.hasShouldSortAtClient()) {
++          setShouldSortAtClient(other.getShouldSortAtClient());
++        }
+         this.mergeUnknownFields(other.getUnknownFields());
+         return this;
+       }
+@@ -5778,6 +5855,59 @@ public final class ClientProtos {
+         return this;
+       }
+ 
++      // optional bool should_sort_at_client = 6 [default = false];
++      private boolean shouldSortAtClient_ ;
++      /**
++       * <code>optional bool should_sort_at_client = 6 [default = false];</code>
++       *
++       * <pre>
++       * When using filters that have unessessial families, server may response disordered cells.
++       * Set this flag to true if we need a sort at client side. See HBASE-15398.
++       * </pre>
++       */
++      public boolean hasShouldSortAtClient() {
++        return ((bitField0_ & 0x00000020) == 0x00000020);
++      }
++      /**
++       * <code>optional bool should_sort_at_client = 6 [default = false];</code>
++       *
++       * <pre>
++       * When using filters that have unessessial families, server may response disordered cells.
++       * Set this flag to true if we need a sort at client side. See HBASE-15398.
++       * </pre>
++       */
++      public boolean getShouldSortAtClient() {
++        return shouldSortAtClient_;
++      }
++      /**
++       * <code>optional bool should_sort_at_client = 6 [default = false];</code>
++       *
++       * <pre>
++       * When using filters that have unessessial families, server may response disordered cells.
++       * Set this flag to true if we need a sort at client side. See HBASE-15398.
++       * </pre>
++       */
++      public Builder setShouldSortAtClient(boolean value) {
++        bitField0_ |= 0x00000020;
++        shouldSortAtClient_ = value;
++        onChanged();
++        return this;
++      }
++      /**
++       * <code>optional bool should_sort_at_client = 6 [default = false];</code>
++       *
++       * <pre>
++       * When using filters that have unessessial families, server may response disordered cells.
++       * Set this flag to true if we need a sort at client side. See HBASE-15398.
++       * </pre>
++       */
++      public Builder clearShouldSortAtClient() {
++        bitField0_ = (bitField0_ & ~0x00000020);
++        shouldSortAtClient_ = false;
++        onChanged();
++        return this;
++      }
++
+       // @@protoc_insertion_point(builder_scope:hbase.pb.Result)
+     }
+ 
+@@ -18850,6 +18980,32 @@ public final class ClientProtos {
+      * </pre>
+      */
+     org.apache.hadoop.hbase.protobuf.generated.MapReduceProtos.ScanMetricsOrBuilder getScanMetricsOrBuilder();
++
++    // repeated bool should_sort_flag_per_result = 11;
++    /**
++     * <code>repeated bool should_sort_flag_per_result = 11;</code>
++     *
++     * <pre>
++     * see should_sort_at_client in Result
++     * </pre>
++     */
++    java.util.List<java.lang.Boolean> getShouldSortFlagPerResultList();
++    /**
++     * <code>repeated bool should_sort_flag_per_result = 11;</code>
++     *
++     * <pre>
++     * see should_sort_at_client in Result
++     * </pre>
++     */
++    int getShouldSortFlagPerResultCount();
++    /**
++     * <code>repeated bool should_sort_flag_per_result = 11;</code>
++     *
++     * <pre>
++     * see should_sort_at_client in Result
++     * </pre>
++     */
++    boolean getShouldSortFlagPerResult(int index);
+   }
+   /**
+    * Protobuf type {@code hbase.pb.ScanResponse}
+@@ -19001,6 +19157,27 @@ public final class ClientProtos {
+               bitField0_ |= 0x00000040;
+               break;
+             }
++            case 88: {
++              if (!((mutable_bitField0_ & 0x00000400) == 0x00000400)) {
++                shouldSortFlagPerResult_ = new java.util.ArrayList<java.lang.Boolean>();
++                mutable_bitField0_ |= 0x00000400;
++              }
++              shouldSortFlagPerResult_.add(input.readBool());
++              break;
++            }
++            case 90: {
++              int length = input.readRawVarint32();
++              int limit = input.pushLimit(length);
++              if (!((mutable_bitField0_ & 0x00000400) == 0x00000400) && input.getBytesUntilLimit() > 0) {
++                shouldSortFlagPerResult_ = new java.util.ArrayList<java.lang.Boolean>();
++                mutable_bitField0_ |= 0x00000400;
++              }
++              while (input.getBytesUntilLimit() > 0) {
++                shouldSortFlagPerResult_.add(input.readBool());
++              }
++              input.popLimit(limit);
++              break;
++            }
+           }
+         }
+       } catch (com.google.protobuf.InvalidProtocolBufferException e) {
+@@ -19018,6 +19195,9 @@ public final class ClientProtos {
+         if (((mutable_bitField0_ & 0x00000040) == 0x00000040)) {
+           partialFlagPerResult_ = java.util.Collections.unmodifiableList(partialFlagPerResult_);
+         }
++        if (((mutable_bitField0_ & 0x00000400) == 0x00000400)) {
++          shouldSortFlagPerResult_ = java.util.Collections.unmodifiableList(shouldSortFlagPerResult_);
++        }
+         this.unknownFields = unknownFields.build();
+         makeExtensionsImmutable();
+       }
+@@ -19384,6 +19564,41 @@ public final class ClientProtos {
+       return scanMetrics_;
+     }
+ 
++    // repeated bool should_sort_flag_per_result = 11;
++    public static final int SHOULD_SORT_FLAG_PER_RESULT_FIELD_NUMBER = 11;
++    private java.util.List<java.lang.Boolean> shouldSortFlagPerResult_;
++    /**
++     * <code>repeated bool should_sort_flag_per_result = 11;</code>
++     *
++     * <pre>
++     * see should_sort_at_client in Result
++     * </pre>
++     */
++    public java.util.List<java.lang.Boolean>
++        getShouldSortFlagPerResultList() {
++      return shouldSortFlagPerResult_;
++    }
++    /**
++     * <code>repeated bool should_sort_flag_per_result = 11;</code>
++     *
++     * <pre>
++     * see should_sort_at_client in Result
++     * </pre>
++     */
++    public int getShouldSortFlagPerResultCount() {
++      return shouldSortFlagPerResult_.size();
++    }
++    /**
++     * <code>repeated bool should_sort_flag_per_result = 11;</code>
++     *
++     * <pre>
++     * see should_sort_at_client in Result
++     * </pre>
++     */
++    public boolean getShouldSortFlagPerResult(int index) {
++      return shouldSortFlagPerResult_.get(index);
++    }
++
+     private void initFields() {
+       cellsPerResult_ = java.util.Collections.emptyList();
+       scannerId_ = 0L;
+@@ -19395,6 +19610,7 @@ public final class ClientProtos {
+       moreResultsInRegion_ = false;
+       heartbeatMessage_ = false;
+       scanMetrics_ = org.apache.hadoop.hbase.protobuf.generated.MapReduceProtos.ScanMetrics.getDefaultInstance();
++      shouldSortFlagPerResult_ = java.util.Collections.emptyList();
+     }
+     private byte memoizedIsInitialized = -1;
+     public final boolean isInitialized() {
+@@ -19438,6 +19654,9 @@ public final class ClientProtos {
+       if (((bitField0_ & 0x00000040) == 0x00000040)) {
+         output.writeMessage(10, scanMetrics_);
+       }
++      for (int i = 0; i < shouldSortFlagPerResult_.size(); i++) {
++        output.writeBool(11, shouldSortFlagPerResult_.get(i));
++      }
+       getUnknownFields().writeTo(output);
+     }
+ 
+@@ -19494,6 +19713,12 @@ public final class ClientProtos {
+         size += com.google.protobuf.CodedOutputStream
+           .computeMessageSize(10, scanMetrics_);
+       }
++      {
++        int dataSize = 0;
++        dataSize = 1 * getShouldSortFlagPerResultList().size();
++        size += dataSize;
++        size += 1 * getShouldSortFlagPerResultList().size();
++      }
+       size += getUnknownFields().getSerializedSize();
+       memoizedSerializedSize = size;
+       return size;
+@@ -19558,6 +19783,8 @@ public final class ClientProtos {
+         result = result && getScanMetrics()
+             .equals(other.getScanMetrics());
+       }
++      result = result && getShouldSortFlagPerResultList()
++          .equals(other.getShouldSortFlagPerResultList());
+       result = result &&
+           getUnknownFields().equals(other.getUnknownFields());
+       return result;
+@@ -19611,6 +19838,10 @@ public final class ClientProtos {
+         hash = (37 * hash) + SCAN_METRICS_FIELD_NUMBER;
+         hash = (53 * hash) + getScanMetrics().hashCode();
+       }
++      if (getShouldSortFlagPerResultCount() > 0) {
++        hash = (37 * hash) + SHOULD_SORT_FLAG_PER_RESULT_FIELD_NUMBER;
++        hash = (53 * hash) + getShouldSortFlagPerResultList().hashCode();
++      }
+       hash = (29 * hash) + getUnknownFields().hashCode();
+       memoizedHashCode = hash;
+       return hash;
+@@ -19756,6 +19987,8 @@ public final class ClientProtos {
+           scanMetricsBuilder_.clear();
+         }
+         bitField0_ = (bitField0_ & ~0x00000200);
++        shouldSortFlagPerResult_ = java.util.Collections.emptyList();
++        bitField0_ = (bitField0_ & ~0x00000400);
+         return this;
+       }
+ 
+@@ -19835,6 +20068,11 @@ public final class ClientProtos {
+         } else {
+           result.scanMetrics_ = scanMetricsBuilder_.build();
+         }
++        if (((bitField0_ & 0x00000400) == 0x00000400)) {
++          shouldSortFlagPerResult_ = java.util.Collections.unmodifiableList(shouldSortFlagPerResult_);
++          bitField0_ = (bitField0_ & ~0x00000400);
++        }
++        result.shouldSortFlagPerResult_ = shouldSortFlagPerResult_;
+         result.bitField0_ = to_bitField0_;
+         onBuilt();
+         return result;
+@@ -19918,6 +20156,16 @@ public final class ClientProtos {
+         if (other.hasScanMetrics()) {
+           mergeScanMetrics(other.getScanMetrics());
+         }
++        if (!other.shouldSortFlagPerResult_.isEmpty()) {
++          if (shouldSortFlagPerResult_.isEmpty()) {
++            shouldSortFlagPerResult_ = other.shouldSortFlagPerResult_;
++            bitField0_ = (bitField0_ & ~0x00000400);
++          } else {
++            ensureShouldSortFlagPerResultIsMutable();
++            shouldSortFlagPerResult_.addAll(other.shouldSortFlagPerResult_);
++          }
++          onChanged();
++        }
+         this.mergeUnknownFields(other.getUnknownFields());
+         return this;
+       }
+@@ -20986,6 +21234,100 @@ public final class ClientProtos {
+         return scanMetricsBuilder_;
+       }
+ 
++      // repeated bool should_sort_flag_per_result = 11;
++      private java.util.List<java.lang.Boolean> shouldSortFlagPerResult_ = java.util.Collections.emptyList();
++      private void ensureShouldSortFlagPerResultIsMutable() {
++        if (!((bitField0_ & 0x00000400) == 0x00000400)) {
++          shouldSortFlagPerResult_ = new java.util.ArrayList<java.lang.Boolean>(shouldSortFlagPerResult_);
++          bitField0_ |= 0x00000400;
++         }
++      }
++      /**
++       * <code>repeated bool should_sort_flag_per_result = 11;</code>
++       *
++       * <pre>
++       * see should_sort_at_client in Result
++       * </pre>
++       */
++      public java.util.List<java.lang.Boolean>
++          getShouldSortFlagPerResultList() {
++        return java.util.Collections.unmodifiableList(shouldSortFlagPerResult_);
++      }
++      /**
++       * <code>repeated bool should_sort_flag_per_result = 11;</code>
++       *
++       * <pre>
++       * see should_sort_at_client in Result
++       * </pre>
++       */
++      public int getShouldSortFlagPerResultCount() {
++        return shouldSortFlagPerResult_.size();
++      }
++      /**
++       * <code>repeated bool should_sort_flag_per_result = 11;</code>
++       *
++       * <pre>
++       * see should_sort_at_client in Result
++       * </pre>
++       */
++      public boolean getShouldSortFlagPerResult(int index) {
++        return shouldSortFlagPerResult_.get(index);
++      }
++      /**
++       * <code>repeated bool should_sort_flag_per_result = 11;</code>
++       *
++       * <pre>
++       * see should_sort_at_client in Result
++       * </pre>
++       */
++      public Builder setShouldSortFlagPerResult(
++          int index, boolean value) {
++        ensureShouldSortFlagPerResultIsMutable();
++        shouldSortFlagPerResult_.set(index, value);
++        onChanged();
++        return this;
++      }
++      /**
++       * <code>repeated bool should_sort_flag_per_result = 11;</code>
++       *
++       * <pre>
++       * see should_sort_at_client in Result
++       * </pre>
++       */
++      public Builder addShouldSortFlagPerResult(boolean value) {
++        ensureShouldSortFlagPerResultIsMutable();
++        shouldSortFlagPerResult_.add(value);
++        onChanged();
++        return this;
++      }
++      /**
++       * <code>repeated bool should_sort_flag_per_result = 11;</code>
++       *
++       * <pre>
++       * see should_sort_at_client in Result
++       * </pre>
++       */
++      public Builder addAllShouldSortFlagPerResult(
++          java.lang.Iterable<? extends java.lang.Boolean> values) {
++        ensureShouldSortFlagPerResultIsMutable();
++        super.addAll(values, shouldSortFlagPerResult_);
++        onChanged();
++        return this;
++      }
++      /**
++       * <code>repeated bool should_sort_flag_per_result = 11;</code>
++       *
++       * <pre>
++       * see should_sort_at_client in Result
++       * </pre>
++       */
++      public Builder clearShouldSortFlagPerResult() {
++        shouldSortFlagPerResult_ = java.util.Collections.emptyList();
++        bitField0_ = (bitField0_ & ~0x00000400);
++        onChanged();
++        return this;
++      }
++
+       // @@protoc_insertion_point(builder_scope:hbase.pb.ScanResponse)
+     }
+ 
+@@ -29034,7 +29376,7 @@ public final class ClientProtos {
+     /**
+      * <code>repeated .hbase.pb.RegionSpecifier region = 1;</code>
+      */
+-    java.util.List<org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.RegionSpecifier>
++    java.util.List<org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.RegionSpecifier> 
+         getRegionList();
+     /**
+      * <code>repeated .hbase.pb.RegionSpecifier region = 1;</code>
+@@ -29047,7 +29389,7 @@ public final class ClientProtos {
+     /**
+      * <code>repeated .hbase.pb.RegionSpecifier region = 1;</code>
+      */
+-    java.util.List<? extends org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.RegionSpecifierOrBuilder>
++    java.util.List<? extends org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.RegionSpecifierOrBuilder> 
+         getRegionOrBuilderList();
+     /**
+      * <code>repeated .hbase.pb.RegionSpecifier region = 1;</code>
+@@ -29059,7 +29401,7 @@ public final class ClientProtos {
+     /**
+      * <code>repeated .hbase.pb.RegionLoadStats stat = 2;</code>
+      */
+-    java.util.List<org.apache.hadoop.hbase.protobuf.generated.ClientProtos.RegionLoadStats>
++    java.util.List<org.apache.hadoop.hbase.protobuf.generated.ClientProtos.RegionLoadStats> 
+         getStatList();
+     /**
+      * <code>repeated .hbase.pb.RegionLoadStats stat = 2;</code>
+@@ -29072,7 +29414,7 @@ public final class ClientProtos {
+     /**
+      * <code>repeated .hbase.pb.RegionLoadStats stat = 2;</code>
+      */
+-    java.util.List<? extends org.apache.hadoop.hbase.protobuf.generated.ClientProtos.RegionLoadStatsOrBuilder>
++    java.util.List<? extends org.apache.hadoop.hbase.protobuf.generated.ClientProtos.RegionLoadStatsOrBuilder> 
+         getStatOrBuilderList();
+     /**
+      * <code>repeated .hbase.pb.RegionLoadStats stat = 2;</code>
+@@ -29204,7 +29546,7 @@ public final class ClientProtos {
+     /**
+      * <code>repeated .hbase.pb.RegionSpecifier region = 1;</code>
+      */
+-    public java.util.List<? extends org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.RegionSpecifierOrBuilder>
++    public java.util.List<? extends org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.RegionSpecifierOrBuilder> 
+         getRegionOrBuilderList() {
+       return region_;
+     }
+@@ -29240,7 +29582,7 @@ public final class ClientProtos {
+     /**
+      * <code>repeated .hbase.pb.RegionLoadStats stat = 2;</code>
+      */
+-    public java.util.List<? extends org.apache.hadoop.hbase.protobuf.generated.ClientProtos.RegionLoadStatsOrBuilder>
++    public java.util.List<? extends org.apache.hadoop.hbase.protobuf.generated.ClientProtos.RegionLoadStatsOrBuilder> 
+         getStatOrBuilderList() {
+       return stat_;
+     }
+@@ -29558,7 +29900,7 @@ public final class ClientProtos {
+               regionBuilder_ = null;
+               region_ = other.region_;
+               bitField0_ = (bitField0_ & ~0x00000001);
+-              regionBuilder_ =
++              regionBuilder_ = 
+                 com.google.protobuf.GeneratedMessage.alwaysUseFieldBuilders ?
+                    getRegionFieldBuilder() : null;
+             } else {
+@@ -29584,7 +29926,7 @@ public final class ClientProtos {
+               statBuilder_ = null;
+               stat_ = other.stat_;
+               bitField0_ = (bitField0_ & ~0x00000002);
+-              statBuilder_ =
++              statBuilder_ = 
+                 com.google.protobuf.GeneratedMessage.alwaysUseFieldBuilders ?
+                    getStatFieldBuilder() : null;
+             } else {
+@@ -29599,7 +29941,7 @@ public final class ClientProtos {
+       public final boolean isInitialized() {
+         for (int i = 0; i < getRegionCount(); i++) {
+           if (!getRegion(i).isInitialized()) {
+-
++            
+             return false;
+           }
+         }
+@@ -29820,7 +30162,7 @@ public final class ClientProtos {
+       /**
+        * <code>repeated .hbase.pb.RegionSpecifier region = 1;</code>
+        */
+-      public java.util.List<? extends org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.RegionSpecifierOrBuilder>
++      public java.util.List<? extends org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.RegionSpecifierOrBuilder> 
+            getRegionOrBuilderList() {
+         if (regionBuilder_ != null) {
+           return regionBuilder_.getMessageOrBuilderList();
+@@ -29846,12 +30188,12 @@ public final class ClientProtos {
+       /**
+        * <code>repeated .hbase.pb.RegionSpecifier region = 1;</code>
+        */
+-      public java.util.List<org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.RegionSpecifier.Builder>
++      public java.util.List<org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.RegionSpecifier.Builder> 
+            getRegionBuilderList() {
+         return getRegionFieldBuilder().getBuilderList();
+       }
+       private com.google.protobuf.RepeatedFieldBuilder<
+-          org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.RegionSpecifier, org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.RegionSpecifier.Builder, org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.RegionSpecifierOrBuilder>
++          org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.RegionSpecifier, org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.RegionSpecifier.Builder, org.apache.hadoop.hbase.protobuf.generated.HBaseProtos.RegionSpecifierOrBuilder> 
+           getRegionFieldBuilder() {
+         if (regionBuilder_ == null) {
+           regionBuilder_ = new com.google.protobuf.RepeatedFieldBuilder<
+@@ -30060,7 +30402,7 @@ public final class ClientProtos {
+       /**
+        * <code>repeated .hbase.pb.RegionLoadStats stat = 2;</code>
+        */
+-      public java.util.List<? extends org.apache.hadoop.hbase.protobuf.generated.ClientProtos.RegionLoadStatsOrBuilder>
++      public java.util.List<? extends org.apache.hadoop.hbase.protobuf.generated.ClientProtos.RegionLoadStatsOrBuilder> 
+            getStatOrBuilderList() {
+         if (statBuilder_ != null) {
+           return statBuilder_.getMessageOrBuilderList();
+@@ -30086,12 +30428,12 @@ public final class ClientProtos {
+       /**
+        * <code>repeated .hbase.pb.RegionLoadStats stat = 2;</code>
+        */
+-      public java.util.List<org.apache.hadoop.hbase.protobuf.generated.ClientProtos.RegionLoadStats.Builder>
++      public java.util.List<org.apache.hadoop.hbase.protobuf.generated.ClientProtos.RegionLoadStats.Builder> 
+            getStatBuilderList() {
+         return getStatFieldBuilder().getBuilderList();
+       }
+       private com.google.protobuf.RepeatedFieldBuilder<
+-          org.apache.hadoop.hbase.protobuf.generated.ClientProtos.RegionLoadStats, org.apache.hadoop.hbase.protobuf.generated.ClientProtos.RegionLoadStats.Builder, org.apache.hadoop.hbase.protobuf.generated.ClientProtos.RegionLoadStatsOrBuilder>
++          org.apache.hadoop.hbase.protobuf.generated.ClientProtos.RegionLoadStats, org.apache.hadoop.hbase.protobuf.generated.ClientProtos.RegionLoadStats.Builder, org.apache.hadoop.hbase.protobuf.generated.ClientProtos.RegionLoadStatsOrBuilder> 
+           getStatFieldBuilder() {
+         if (statBuilder_ == null) {
+           statBuilder_ = new com.google.protobuf.RepeatedFieldBuilder<
+@@ -34220,7 +34562,7 @@ public final class ClientProtos {
+         }
+         if (hasRegionStatistics()) {
+           if (!getRegionStatistics().isInitialized()) {
+-
++            
+             return false;
+           }
+         }
+@@ -34639,7 +34981,7 @@ public final class ClientProtos {
+        * <code>optional .hbase.pb.MultiRegionLoadStats regionStatistics = 3;</code>
+        */
+       private com.google.protobuf.SingleFieldBuilder<
+-          org.apache.hadoop.hbase.protobuf.generated.ClientProtos.MultiRegionLoadStats, org.apache.hadoop.hbase.protobuf.generated.ClientProtos.MultiRegionLoadStats.Builder, org.apache.hadoop.hbase.protobuf.generated.ClientProtos.MultiRegionLoadStatsOrBuilder>
++          org.apache.hadoop.hbase.protobuf.generated.ClientProtos.MultiRegionLoadStats, org.apache.hadoop.hbase.protobuf.generated.ClientProtos.MultiRegionLoadStats.Builder, org.apache.hadoop.hbase.protobuf.generated.ClientProtos.MultiRegionLoadStatsOrBuilder> 
+           getRegionStatisticsFieldBuilder() {
+         if (regionStatisticsBuilder_ == null) {
+           regionStatisticsBuilder_ = new com.google.protobuf.SingleFieldBuilder<
+@@ -35500,134 +35842,135 @@ public final class ClientProtos {
+       " \001(\r\022\035\n\016existence_only\030\n \001(\010:\005false\0222\n\013c" +
+       "onsistency\030\014 \001(\0162\025.hbase.pb.Consistency:" +
+       "\006STRONG\0226\n\rcf_time_range\030\r \003(\0132\037.hbase.p" +
+-      "b.ColumnFamilyTimeRange\"\203\001\n\006Result\022\034\n\004ce" +
++      "b.ColumnFamilyTimeRange\"\251\001\n\006Result\022\034\n\004ce" +
+       "ll\030\001 \003(\0132\016.hbase.pb.Cell\022\035\n\025associated_c" +
+       "ell_count\030\002 \001(\005\022\016\n\006exists\030\003 \001(\010\022\024\n\005stale" +
+-      "\030\004 \001(\010:\005false\022\026\n\007partial\030\005 \001(\010:\005false\"S\n" +
+-      "\nGetRequest\022)\n\006region\030\001 \002(\0132\031.hbase.pb.R",
+-      "egionSpecifier\022\032\n\003get\030\002 \002(\0132\r.hbase.pb.G" +
+-      "et\"/\n\013GetResponse\022 \n\006result\030\001 \001(\0132\020.hbas" +
+-      "e.pb.Result\"\222\001\n\tCondition\022\013\n\003row\030\001 \002(\014\022\016" +
+-      "\n\006family\030\002 \002(\014\022\021\n\tqualifier\030\003 \002(\014\022+\n\014com" +
+-      "pare_type\030\004 \002(\0162\025.hbase.pb.CompareType\022(" +
+-      "\n\ncomparator\030\005 \002(\0132\024.hbase.pb.Comparator" +
+-      "\"\364\006\n\rMutationProto\022\013\n\003row\030\001 \001(\014\0229\n\013mutat" +
+-      "e_type\030\002 \001(\0162$.hbase.pb.MutationProto.Mu" +
+-      "tationType\0229\n\014column_value\030\003 \003(\0132#.hbase" +
+-      ".pb.MutationProto.ColumnValue\022\021\n\ttimesta",
+-      "mp\030\004 \001(\004\022*\n\tattribute\030\005 \003(\0132\027.hbase.pb.N" +
+-      "ameBytesPair\022C\n\ndurability\030\006 \001(\0162\".hbase" +
+-      ".pb.MutationProto.Durability:\013USE_DEFAUL" +
+-      "T\022\'\n\ntime_range\030\007 \001(\0132\023.hbase.pb.TimeRan" +
+-      "ge\022\035\n\025associated_cell_count\030\010 \001(\005\022\r\n\005non" +
+-      "ce\030\t \001(\004\032\371\001\n\013ColumnValue\022\016\n\006family\030\001 \002(\014" +
+-      "\022K\n\017qualifier_value\030\002 \003(\01322.hbase.pb.Mut" +
+-      "ationProto.ColumnValue.QualifierValue\032\214\001" +
+-      "\n\016QualifierValue\022\021\n\tqualifier\030\001 \001(\014\022\r\n\005v" +
+-      "alue\030\002 \001(\014\022\021\n\ttimestamp\030\003 \001(\004\0227\n\013delete_",
+-      "type\030\004 \001(\0162\".hbase.pb.MutationProto.Dele" +
+-      "teType\022\014\n\004tags\030\005 \001(\014\"W\n\nDurability\022\017\n\013US" +
+-      "E_DEFAULT\020\000\022\014\n\010SKIP_WAL\020\001\022\r\n\tASYNC_WAL\020\002" +
+-      "\022\014\n\010SYNC_WAL\020\003\022\r\n\tFSYNC_WAL\020\004\">\n\014Mutatio" +
+-      "nType\022\n\n\006APPEND\020\000\022\r\n\tINCREMENT\020\001\022\007\n\003PUT\020" +
+-      "\002\022\n\n\006DELETE\020\003\"p\n\nDeleteType\022\026\n\022DELETE_ON" +
+-      "E_VERSION\020\000\022\034\n\030DELETE_MULTIPLE_VERSIONS\020" +
+-      "\001\022\021\n\rDELETE_FAMILY\020\002\022\031\n\025DELETE_FAMILY_VE" +
+-      "RSION\020\003\"\242\001\n\rMutateRequest\022)\n\006region\030\001 \002(" +
+-      "\0132\031.hbase.pb.RegionSpecifier\022)\n\010mutation",
+-      "\030\002 \002(\0132\027.hbase.pb.MutationProto\022&\n\tcondi" +
+-      "tion\030\003 \001(\0132\023.hbase.pb.Condition\022\023\n\013nonce" +
+-      "_group\030\004 \001(\004\"E\n\016MutateResponse\022 \n\006result" +
+-      "\030\001 \001(\0132\020.hbase.pb.Result\022\021\n\tprocessed\030\002 " +
+-      "\001(\010\"\275\004\n\004Scan\022 \n\006column\030\001 \003(\0132\020.hbase.pb." +
+-      "Column\022*\n\tattribute\030\002 \003(\0132\027.hbase.pb.Nam" +
+-      "eBytesPair\022\021\n\tstart_row\030\003 \001(\014\022\020\n\010stop_ro" +
+-      "w\030\004 \001(\014\022 \n\006filter\030\005 \001(\0132\020.hbase.pb.Filte" +
+-      "r\022\'\n\ntime_range\030\006 \001(\0132\023.hbase.pb.TimeRan" +
+-      "ge\022\027\n\014max_versions\030\007 \001(\r:\0011\022\032\n\014cache_blo",
+-      "cks\030\010 \001(\010:\004true\022\022\n\nbatch_size\030\t \001(\r\022\027\n\017m" +
+-      "ax_result_size\030\n \001(\004\022\023\n\013store_limit\030\013 \001(" +
+-      "\r\022\024\n\014store_offset\030\014 \001(\r\022&\n\036load_column_f" +
+-      "amilies_on_demand\030\r \001(\010\022\r\n\005small\030\016 \001(\010\022\027" +
+-      "\n\010reversed\030\017 \001(\010:\005false\0222\n\013consistency\030\020" +
+-      " \001(\0162\025.hbase.pb.Consistency:\006STRONG\022\017\n\007c" +
+-      "aching\030\021 \001(\r\022\035\n\025allow_partial_results\030\022 " +
+-      "\001(\010\0226\n\rcf_time_range\030\023 \003(\0132\037.hbase.pb.Co" +
+-      "lumnFamilyTimeRange\"\246\002\n\013ScanRequest\022)\n\006r" +
+-      "egion\030\001 \001(\0132\031.hbase.pb.RegionSpecifier\022\034",
+-      "\n\004scan\030\002 \001(\0132\016.hbase.pb.Scan\022\022\n\nscanner_" +
+-      "id\030\003 \001(\004\022\026\n\016number_of_rows\030\004 \001(\r\022\025\n\rclos" +
+-      "e_scanner\030\005 \001(\010\022\025\n\rnext_call_seq\030\006 \001(\004\022\037" +
+-      "\n\027client_handles_partials\030\007 \001(\010\022!\n\031clien" +
+-      "t_handles_heartbeats\030\010 \001(\010\022\032\n\022track_scan" +
+-      "_metrics\030\t \001(\010\022\024\n\005renew\030\n \001(\010:\005false\"\232\002\n" +
+-      "\014ScanResponse\022\030\n\020cells_per_result\030\001 \003(\r\022" +
+-      "\022\n\nscanner_id\030\002 \001(\004\022\024\n\014more_results\030\003 \001(" +
+-      "\010\022\013\n\003ttl\030\004 \001(\r\022!\n\007results\030\005 \003(\0132\020.hbase." +
+-      "pb.Result\022\r\n\005stale\030\006 \001(\010\022\037\n\027partial_flag",
+-      "_per_result\030\007 \003(\010\022\036\n\026more_results_in_reg" +
+-      "ion\030\010 \001(\010\022\031\n\021heartbeat_message\030\t \001(\010\022+\n\014" +
+-      "scan_metrics\030\n \001(\0132\025.hbase.pb.ScanMetric" +
+-      "s\"\305\001\n\024BulkLoadHFileRequest\022)\n\006region\030\001 \002" +
+-      "(\0132\031.hbase.pb.RegionSpecifier\022>\n\013family_" +
+-      "path\030\002 \003(\0132).hbase.pb.BulkLoadHFileReque" +
+-      "st.FamilyPath\022\026\n\016assign_seq_num\030\003 \001(\010\032*\n" +
+-      "\nFamilyPath\022\016\n\006family\030\001 \002(\014\022\014\n\004path\030\002 \002(" +
+-      "\t\"\'\n\025BulkLoadHFileResponse\022\016\n\006loaded\030\001 \002" +
+-      "(\010\"a\n\026CoprocessorServiceCall\022\013\n\003row\030\001 \002(",
+-      "\014\022\024\n\014service_name\030\002 \002(\t\022\023\n\013method_name\030\003" +
+-      " \002(\t\022\017\n\007request\030\004 \002(\014\"B\n\030CoprocessorServ" +
+-      "iceResult\022&\n\005value\030\001 \001(\0132\027.hbase.pb.Name" +
+-      "BytesPair\"v\n\031CoprocessorServiceRequest\022)" +
+-      "\n\006region\030\001 \002(\0132\031.hbase.pb.RegionSpecifie" +
+-      "r\022.\n\004call\030\002 \002(\0132 .hbase.pb.CoprocessorSe" +
+-      "rviceCall\"o\n\032CoprocessorServiceResponse\022" +
+-      ")\n\006region\030\001 \002(\0132\031.hbase.pb.RegionSpecifi" +
+-      "er\022&\n\005value\030\002 \002(\0132\027.hbase.pb.NameBytesPa" +
+-      "ir\"\226\001\n\006Action\022\r\n\005index\030\001 \001(\r\022)\n\010mutation",
+-      "\030\002 \001(\0132\027.hbase.pb.MutationProto\022\032\n\003get\030\003" +
+-      " \001(\0132\r.hbase.pb.Get\0226\n\014service_call\030\004 \001(" +
+-      "\0132 .hbase.pb.CoprocessorServiceCall\"k\n\014R" +
+-      "egionAction\022)\n\006region\030\001 \002(\0132\031.hbase.pb.R" +
+-      "egionSpecifier\022\016\n\006atomic\030\002 \001(\010\022 \n\006action" +
+-      "\030\003 \003(\0132\020.hbase.pb.Action\"c\n\017RegionLoadSt" +
+-      "ats\022\027\n\014memstoreLoad\030\001 \001(\005:\0010\022\030\n\rheapOccu" +
+-      "pancy\030\002 \001(\005:\0010\022\035\n\022compactionPressure\030\003 \001" +
+-      "(\005:\0010\"j\n\024MultiRegionLoadStats\022)\n\006region\030" +
+-      "\001 \003(\0132\031.hbase.pb.RegionSpecifier\022\'\n\004stat",
+-      "\030\002 \003(\0132\031.hbase.pb.RegionLoadStats\"\336\001\n\021Re" +
+-      "sultOrException\022\r\n\005index\030\001 \001(\r\022 \n\006result" +
+-      "\030\002 \001(\0132\020.hbase.pb.Result\022*\n\texception\030\003 " +
+-      "\001(\0132\027.hbase.pb.NameBytesPair\022:\n\016service_" +
+-      "result\030\004 \001(\0132\".hbase.pb.CoprocessorServi" +
+-      "ceResult\0220\n\tloadStats\030\005 \001(\0132\031.hbase.pb.R" +
+-      "egionLoadStatsB\002\030\001\"x\n\022RegionActionResult" +
+-      "\0226\n\021resultOrException\030\001 \003(\0132\033.hbase.pb.R" +
+-      "esultOrException\022*\n\texception\030\002 \001(\0132\027.hb" +
+-      "ase.pb.NameBytesPair\"x\n\014MultiRequest\022,\n\014",
+-      "regionAction\030\001 \003(\0132\026.hbase.pb.RegionActi" +
+-      "on\022\022\n\nnonceGroup\030\002 \001(\004\022&\n\tcondition\030\003 \001(" +
+-      "\0132\023.hbase.pb.Condition\"\226\001\n\rMultiResponse" +
+-      "\0228\n\022regionActionResult\030\001 \003(\0132\034.hbase.pb." +
+-      "RegionActionResult\022\021\n\tprocessed\030\002 \001(\010\0228\n" +
+-      "\020regionStatistics\030\003 \001(\0132\036.hbase.pb.Multi" +
+-      "RegionLoadStats*\'\n\013Consistency\022\n\n\006STRONG" +
+-      "\020\000\022\014\n\010TIMELINE\020\0012\203\004\n\rClientService\0222\n\003Ge" +
+-      "t\022\024.hbase.pb.GetRequest\032\025.hbase.pb.GetRe" +
+-      "sponse\022;\n\006Mutate\022\027.hbase.pb.MutateReques",
+-      "t\032\030.hbase.pb.MutateResponse\0225\n\004Scan\022\025.hb" +
+-      "ase.pb.ScanRequest\032\026.hbase.pb.ScanRespon" +
+-      "se\022P\n\rBulkLoadHFile\022\036.hbase.pb.BulkLoadH" +
+-      "FileRequest\032\037.hbase.pb.BulkLoadHFileResp" +
+-      "onse\022X\n\013ExecService\022#.hbase.pb.Coprocess" +
+-      "orServiceRequest\032$.hbase.pb.CoprocessorS" +
+-      "erviceResponse\022d\n\027ExecRegionServerServic" +
+-      "e\022#.hbase.pb.CoprocessorServiceRequest\032$" +
+-      ".hbase.pb.CoprocessorServiceResponse\0228\n\005" +
+-      "Multi\022\026.hbase.pb.MultiRequest\032\027.hbase.pb",
+-      ".MultiResponseBB\n*org.apache.hadoop.hbas" +
+-      "e.protobuf.generatedB\014ClientProtosH\001\210\001\001\240" +
+-      "\001\001"
++      "\030\004 \001(\010:\005false\022\026\n\007partial\030\005 \001(\010:\005false\022$\n" +
++      "\025should_sort_at_client\030\006 \001(\010:\005false\"S\n\nG",
++      "etRequest\022)\n\006region\030\001 \002(\0132\031.hbase.pb.Reg" +
++      "ionSpecifier\022\032\n\003get\030\002 \002(\0132\r.hbase.pb.Get" +
++      "\"/\n\013GetResponse\022 \n\006result\030\001 \001(\0132\020.hbase." +
++      "pb.Result\"\222\001\n\tCondition\022\013\n\003row\030\001 \002(\014\022\016\n\006" +
++      "family\030\002 \002(\014\022\021\n\tqualifier\030\003 \002(\014\022+\n\014compa" +
++      "re_type\030\004 \002(\0162\025.hbase.pb.CompareType\022(\n\n" +
++      "comparator\030\005 \002(\0132\024.hbase.pb.Comparator\"\364" +
++      "\006\n\rMutationProto\022\013\n\003row\030\001 \001(\014\0229\n\013mutate_" +
++      "type\030\002 \001(\0162$.hbase.pb.MutationProto.Muta" +
++      "tionType\0229\n\014column_value\030\003 \003(\0132#.hbase.p",
++      "b.MutationProto.ColumnValue\022\021\n\ttimestamp" +
++      "\030\004 \001(\004\022*\n\tattribute\030\005 \003(\0132\027.hbase.pb.Nam" +
++      "eBytesPair\022C\n\ndurability\030\006 \001(\0162\".hbase.p" +
++      "b.MutationProto.Durability:\013USE_DEFAULT\022" +
++      "\'\n\ntime_range\030\007 \001(\0132\023.hbase.pb.TimeRange" +
++      "\022\035\n\025associated_cell_count\030\010 \001(\005\022\r\n\005nonce" +
++      "\030\t \001(\004\032\371\001\n\013ColumnValue\022\016\n\006family\030\001 \002(\014\022K" +
++      "\n\017qualifier_value\030\002 \003(\01322.hbase.pb.Mutat" +
++      "ionProto.ColumnValue.QualifierValue\032\214\001\n\016" +
++      "QualifierValue\022\021\n\tqualifier\030\001 \001(\014\022\r\n\005val",
++      "ue\030\002 \001(\014\022\021\n\ttimestamp\030\003 \001(\004\0227\n\013delete_ty" +
++      "pe\030\004 \001(\0162\".hbase.pb.MutationProto.Delete" +
++      "Type\022\014\n\004tags\030\005 \001(\014\"W\n\nDurability\022\017\n\013USE_" +
++      "DEFAULT\020\000\022\014\n\010SKIP_WAL\020\001\022\r\n\tASYNC_WAL\020\002\022\014" +
++      "\n\010SYNC_WAL\020\003\022\r\n\tFSYNC_WAL\020\004\">\n\014MutationT" +
++      "ype\022\n\n\006APPEND\020\000\022\r\n\tINCREMENT\020\001\022\007\n\003PUT\020\002\022" +
++      "\n\n\006DELETE\020\003\"p\n\nDeleteType\022\026\n\022DELETE_ONE_" +
++      "VERSION\020\000\022\034\n\030DELETE_MULTIPLE_VERSIONS\020\001\022" +
++      "\021\n\rDELETE_FAMILY\020\002\022\031\n\025DELETE_FAMILY_VERS" +
++      "ION\020\003\"\242\001\n\rMutateRequest\022)\n\006region\030\001 \002(\0132",
++      "\031.hbase.pb.RegionSpecifier\022)\n\010mutation\030\002" +
++      " \002(\0132\027.hbase.pb.MutationProto\022&\n\tconditi" +
++      "on\030\003 \001(\0132\023.hbase.pb.Condition\022\023\n\013nonce_g" +
++      "roup\030\004 \001(\004\"E\n\016MutateResponse\022 \n\006result\030\001" +
++      " \001(\0132\020.hbase.pb.Result\022\021\n\tprocessed\030\002 \001(" +
++      "\010\"\275\004\n\004Scan\022 \n\006column\030\001 \003(\0132\020.hbase.pb.Co" +
++      "lumn\022*\n\tattribute\030\002 \003(\0132\027.hbase.pb.NameB" +
++      "ytesPair\022\021\n\tstart_row\030\003 \001(\014\022\020\n\010stop_row\030" +
++      "\004 \001(\014\022 \n\006filter\030\005 \001(\0132\020.hbase.pb.Filter\022" +
++      "\'\n\ntime_range\030\006 \001(\0132\023.hbase.pb.TimeRange",
++      "\022\027\n\014max_versions\030\007 \001(\r:\0011\022\032\n\014cache_block" +
++      "s\030\010 \001(\010:\004true\022\022\n\nbatch_size\030\t \001(\r\022\027\n\017max" +
++      "_result_size\030\n \001(\004\022\023\n\013store_limit\030\013 \001(\r\022" +
++      "\024\n\014store_offset\030\014 \001(\r\022&\n\036load_column_fam" +
++      "ilies_on_demand\030\r \001(\010\022\r\n\005small\030\016 \001(\010\022\027\n\010" +
++      "reversed\030\017 \001(\010:\005false\0222\n\013consistency\030\020 \001" +
++      "(\0162\025.hbase.pb.Consistency:\006STRONG\022\017\n\007cac" +
++      "hing\030\021 \001(\r\022\035\n\025allow_partial_results\030\022 \001(" +
++      "\010\0226\n\rcf_time_range\030\023 \003(\0132\037.hbase.pb.Colu" +
++      "mnFamilyTimeRange\"\246\002\n\013ScanRequest\022)\n\006reg",
++      "ion\030\001 \001(\0132\031.hbase.pb.RegionSpecifier\022\034\n\004" +
++      "scan\030\002 \001(\0132\016.hbase.pb.Scan\022\022\n\nscanner_id" +
++      "\030\003 \001(\004\022\026\n\016number_of_rows\030\004 \001(\r\022\025\n\rclose_" +
++      "scanner\030\005 \001(\010\022\025\n\rnext_call_seq\030\006 \001(\004\022\037\n\027" +
++      "client_handles_partials\030\007 \001(\010\022!\n\031client_" +
++      "handles_heartbeats\030\010 \001(\010\022\032\n\022track_scan_m" +
++      "etrics\030\t \001(\010\022\024\n\005renew\030\n \001(\010:\005false\"\277\002\n\014S" +
++      "canResponse\022\030\n\020cells_per_result\030\001 \003(\r\022\022\n" +
++      "\nscanner_id\030\002 \001(\004\022\024\n\014more_results\030\003 \001(\010\022" +
++      "\013\n\003ttl\030\004 \001(\r\022!\n\007results\030\005 \003(\0132\020.hbase.pb",
++      ".Result\022\r\n\005stale\030\006 \001(\010\022\037\n\027partial_flag_p" +
++      "er_result\030\007 \003(\010\022\036\n\026more_results_in_regio" +
++      "n\030\010 \001(\010\022\031\n\021heartbeat_message\030\t \001(\010\022+\n\014sc" +
++      "an_metrics\030\n \001(\0132\025.hbase.pb.ScanMetrics\022" +
++      "#\n\033should_sort_flag_per_result\030\013 \003(\010\"\305\001\n" +
++      "\024BulkLoadHFileRequest\022)\n\006region\030\001 \002(\0132\031." +
++      "hbase.pb.RegionSpecifier\022>\n\013family_path\030" +
++      "\002 \003(\0132).hbase.pb.BulkLoadHFileRequest.Fa" +
++      "milyPath\022\026\n\016assign_seq_num\030\003 \001(\010\032*\n\nFami" +
++      "lyPath\022\016\n\006family\030\001 \002(\014\022\014\n\004path\030\002 \002(\t\"\'\n\025",
++      "BulkLoadHFileResponse\022\016\n\006loaded\030\001 \002(\010\"a\n" +
++      "\026CoprocessorServiceCall\022\013\n\003row\030\001 \002(\014\022\024\n\014" +
++      "service_name\030\002 \002(\t\022\023\n\013method_name\030\003 \002(\t\022" +
++      "\017\n\007request\030\004 \002(\014\"B\n\030CoprocessorServiceRe" +
++      "sult\022&\n\005value\030\001 \001(\0132\027.hbase.pb.NameBytes" +
++      "Pair\"v\n\031CoprocessorServiceRequest\022)\n\006reg" +
++      "ion\030\001 \002(\0132\031.hbase.pb.RegionSpecifier\022.\n\004" +
++      "call\030\002 \002(\0132 .hbase.pb.CoprocessorService" +
++      "Call\"o\n\032CoprocessorServiceResponse\022)\n\006re" +
++      "gion\030\001 \002(\0132\031.hbase.pb.RegionSpecifier\022&\n",
++      "\005value\030\002 \002(\0132\027.hbase.pb.NameBytesPair\"\226\001" +
++      "\n\006Action\022\r\n\005index\030\001 \001(\r\022)\n\010mutation\030\002 \001(" +
++      "\0132\027.hbase.pb.MutationProto\022\032\n\003get\030\003 \001(\0132" +
++      "\r.hbase.pb.Get\0226\n\014service_call\030\004 \001(\0132 .h" +
++      "base.pb.CoprocessorServiceCall\"k\n\014Region" +
++      "Action\022)\n\006region\030\001 \002(\0132\031.hbase.pb.Region" +
++      "Specifier\022\016\n\006atomic\030\002 \001(\010\022 \n\006action\030\003 \003(" +
++      "\0132\020.hbase.pb.Action\"c\n\017RegionLoadStats\022\027" +
++      "\n\014memstoreLoad\030\001 \001(\005:\0010\022\030\n\rheapOccupancy" +
++      "\030\002 \001(\005:\0010\022\035\n\022compactionPressure\030\003 \001(\005:\0010",
++      "\"j\n\024MultiRegionLoadStats\022)\n\006region\030\001 \003(\013" +
++      "2\031.hbase.pb.RegionSpecifier\022\'\n\004stat\030\002 \003(" +
++      "\0132\031.hbase.pb.RegionLoadStats\"\336\001\n\021ResultO" +
++      "rException\022\r\n\005index\030\001 \001(\r\022 \n\006result\030\002 \001(" +
++      "\0132\020.hbase.pb.Result\022*\n\texception\030\003 \001(\0132\027" +
++      ".hbase.pb.NameBytesPair\022:\n\016service_resul" +
++      "t\030\004 \001(\0132\".hbase.pb.CoprocessorServiceRes" +
++      "ult\0220\n\tloadStats\030\005 \001(\0132\031.hbase.pb.Region" +
++      "LoadStatsB\002\030\001\"x\n\022RegionActionResult\0226\n\021r" +
++      "esultOrException\030\001 \003(\0132\033.hbase.pb.Result",
++      "OrException\022*\n\texception\030\002 \001(\0132\027.hbase.p" +
++      "b.NameBytesPair\"x\n\014MultiRequest\022,\n\014regio" +
++      "nAction\030\001 \003(\0132\026.hbase.pb.RegionAction\022\022\n" +
++      "\nnonceGroup\030\002 \001(\004\022&\n\tcondition\030\003 \001(\0132\023.h" +
++      "base.pb.Condition\"\226\001\n\rMultiResponse\0228\n\022r" +
++      "egionActionResult\030\001 \003(\0132\034.hbase.pb.Regio" +
++      "nActionResult\022\021\n\tprocessed\030\002 \001(\010\0228\n\020regi" +
++      "onStatistics\030\003 \001(\0132\036.hbase.pb.MultiRegio" +
++      "nLoadStats*\'\n\013Consistency\022\n\n\006STRONG\020\000\022\014\n" +
++      "\010TIMELINE\020\0012\203\004\n\rClientService\0222\n\003Get\022\024.h",
++      "base.pb.GetRequest\032\025.hbase.pb.GetRespons" +
++      "e\022;\n\006Mutate\022\027.hbase.pb.MutateRequest\032\030.h" +
++      "base.pb.MutateResponse\0225\n\004Scan\022\025.hbase.p" +
++      "b.ScanRequest\032\026.hbase.pb.ScanResponse\022P\n" +
++      "\rBulkLoadHFile\022\036.hbase.pb.BulkLoadHFileR" +
++      "equest\032\037.hbase.pb.BulkLoadHFileResponse\022" +
++      "X\n\013ExecService\022#.hbase.pb.CoprocessorSer" +
++      "viceRequest\032$.hbase.pb.CoprocessorServic" +
++      "eResponse\022d\n\027ExecRegionServerService\022#.h" +
++      "base.pb.CoprocessorServiceRequest\032$.hbas",
++      "e.pb.CoprocessorServiceResponse\0228\n\005Multi" +
++      "\022\026.hbase.pb.MultiRequest\032\027.hbase.pb.Mult" +
++      "iResponseBB\n*org.apache.hadoop.hbase.pro" +
++      "tobuf.generatedB\014ClientProtosH\001\210\001\001\240\001\001"
+     };
+     com.google.protobuf.Descriptors.FileDescriptor.InternalDescriptorAssigner assigner =
+       new com.google.protobuf.Descriptors.FileDescriptor.InternalDescriptorAssigner() {
+@@ -35663,7 +36006,7 @@ public final class ClientProtos {
+           internal_static_hbase_pb_Result_fieldAccessorTable = new
+             com.google.protobuf.GeneratedMessage.FieldAccessorTable(
+               internal_static_hbase_pb_Result_descriptor,
+-              new java.lang.String[] { "Cell", "AssociatedCellCount", "Exists", "Stale", "Partial", });
++              new java.lang.String[] { "Cell", "AssociatedCellCount", "Exists", "Stale", "Partial", "ShouldSortAtClient", });
+           internal_static_hbase_pb_GetRequest_descriptor =
+             getDescriptor().getMessageTypes().get(5);
+           internal_static_hbase_pb_GetRequest_fieldAccessorTable = new
+@@ -35729,7 +36072,7 @@ public final class ClientProtos {
+           internal_static_hbase_pb_ScanResponse_fieldAccessorTable = new
+             com.google.protobuf.GeneratedMessage.FieldAccessorTable(
+               internal_static_hbase_pb_ScanResponse_descriptor,
+-              new java.lang.String[] { "CellsPerResult", "ScannerId", "MoreResults", "Ttl", "Results", "Stale", "PartialFlagPerResult", "MoreResultsInRegion", "HeartbeatMessage", "ScanMetrics", });
++              new java.lang.String[] { "CellsPerResult", "ScannerId", "MoreResults", "Ttl", "Results", "Stale", "PartialFlagPerResult", "MoreResultsInRegion", "HeartbeatMessage", "ScanMetrics", "ShouldSortFlagPerResult", });
+           internal_static_hbase_pb_BulkLoadHFileRequest_descriptor =
+             getDescriptor().getMessageTypes().get(14);
+           internal_static_hbase_pb_BulkLoadHFileRequest_fieldAccessorTable = new
+diff --git a/hbase-protocol/src/main/protobuf/Client.proto b/hbase-protocol/src/main/protobuf/Client.proto
+index 8a4d459..2d02844 100644
+--- a/hbase-protocol/src/main/protobuf/Client.proto
++++ b/hbase-protocol/src/main/protobuf/Client.proto
+@@ -109,6 +109,10 @@ message Result {
+   // cells for a row and must be combined with a result containing the remaining cells
+   // to form a complete result
+   optional bool partial = 5 [default = false];
++
++  // When using filters that have unessessial families, server may response disordered cells.
++  // Set this flag to true if we need a sort at client side. See HBASE-15398.
++  optional bool should_sort_at_client = 6 [default = false];
+ }
+ 
+ /**
+@@ -327,6 +331,9 @@ message ScanResponse {
+   // The metrics tracked here are sent back to the client to be tracked together with 
+   // the existing client side metrics.
+   optional ScanMetrics scan_metrics = 10;
++
++  // see should_sort_at_client in Result
++  repeated bool should_sort_flag_per_result = 11;
+ }
+ 
+ /**
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
+index d20b478..174e5b5 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/HRegion.java
+@@ -115,10 +115,12 @@ import org.apache.hadoop.hbase.conf.PropagatingConfigurationObserver;
+ import org.apache.hadoop.hbase.coprocessor.RegionObserver.MutationType;
+ import org.apache.hadoop.hbase.errorhandling.ForeignExceptionSnare;
+ import org.apache.hadoop.hbase.exceptions.FailedSanityCheckException;
++import org.apache.hadoop.hbase.exceptions.IllegalArgumentIOException;
+ import org.apache.hadoop.hbase.exceptions.RegionInRecoveryException;
+ import org.apache.hadoop.hbase.exceptions.UnknownProtocolException;
+ import org.apache.hadoop.hbase.filter.ByteArrayComparable;
+ import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
++import org.apache.hadoop.hbase.filter.Filter;
+ import org.apache.hadoop.hbase.filter.FilterWrapper;
+ import org.apache.hadoop.hbase.filter.IncompatibleFilterException;
+ import org.apache.hadoop.hbase.io.HeapSize;
+@@ -2579,8 +2581,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
+   }
+ 
+   public RegionScanner getScanner(Scan scan, boolean copyCellsFromSharedMem) throws IOException {
+-    RegionScanner scanner = getScanner(scan, null, copyCellsFromSharedMem);
+-    return scanner;
++    return getScanner(scan, null, copyCellsFromSharedMem);
+   }
+ 
+   protected RegionScanner getScanner(Scan scan, List<KeyValueScanner> additionalScanners,
+@@ -5471,6 +5472,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
+     private final long maxResultSize;
+     private final ScannerContext defaultScannerContext;
+     private final FilterWrapper filter;
++    private boolean hasUnenssentialFamily = false;
+ 
+     @Override
+     public HRegionInfo getRegionInfo() {
+@@ -5485,6 +5487,16 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
+         boolean copyCellsFromSharedMem)
+         throws IOException {
+       this.region = region;
++      if (scan.doLoadColumnFamiliesOnDemand()) {
++        hasUnenssentialFamily = checkFilterHavingUnenssentialFamily(scan,
++            scan.getFamilyMap().size() > 0 ? scan.getFamilyMap().keySet() :
++                region.getTableDesc().getFamiliesKeys());
++        if (hasUnenssentialFamily && (scan.getAllowPartialResults() || scan.getBatch() > 0)) {
++          //See https://issues.apache.org/jira/browse/HBASE-15398
++          throw new DoNotRetryIOException("can not setAllowPartailResults(true) or setBatch "
++              + "when you have a filter that some family is not enssential");
++        }
++      }
+       this.maxResultSize = scan.getMaxResultSize();
+       if (scan.hasFilter()) {
+         this.filter = new FilterWrapper(scan.getFilter());
+@@ -5634,7 +5646,12 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
+         // partial Result means that we should not reset the filters; filters
+         // should only be reset in
+         // between rows
+-        if (!scannerContext.partialResultFormed()) resetFilters();
++        if (!scannerContext.partialResultFormed()) {
++          resetFilters();
++          if (!outResults.isEmpty()) {
++            incrementCountOfRowsScannedMetric(scannerContext);
++          }
++        }
+ 
+         if (isFilterDoneInternal()) {
+           moreValues = false;
+@@ -5663,22 +5680,26 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
+       return moreValues;
+     }
+ 
++    @Override public boolean hasUnenssentialFamily() {
++      return hasUnenssentialFamily;
++    }
++
+     /**
+      * @return true if more cells exist after this batch, false if scanner is done
+      */
+     private boolean populateFromJoinedHeap(List<Cell> results, ScannerContext scannerContext)
+             throws IOException {
+-      assert joinedContinuationRow != null;
+-      boolean moreValues = populateResult(results, this.joinedHeap, scannerContext,
+-          joinedContinuationRow);
++      boolean moreValues = populateRowFromHeap(results, this.joinedHeap, scannerContext,
++          this.joinedContinuationRow, true);
+ 
+       if (!scannerContext.checkAnyLimitReached(LimitScope.BETWEEN_CELLS)) {
+         // We are done with this row, reset the continuation.
+-        joinedContinuationRow = null;
++        // As the data is obtained from two independent heaps, we need to
++        // ensure that result list is sorted, because Result relies on that.
++        // Or we need response a partial result to client and let client sort them.
++        sort(results, comparator);
+       }
+-      // As the data is obtained from two independent heaps, we need to
+-      // ensure that result list is sorted, because Result relies on that.
+-      sort(results, comparator);
++
+       return moreValues;
+     }
+ 
+@@ -5686,38 +5707,42 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
+      * Fetches records with currentRow into results list, until next row, batchLimit (if not -1) is
+      * reached, or remainingResultSize (if not -1) is reaced
+      * @param heap KeyValueHeap to fetch data from.It must be positioned on correct row before call.
+-     * @param scannerContext
+-     * @param currentRowCell
++     * @param isJoinedHeapOrNoJoinedHeap whether this heap is the last heap in this row
+      * @return state of last call to {@link KeyValueHeap#next()}
+      */
+-    private boolean populateResult(List<Cell> results, KeyValueHeap heap,
+-        ScannerContext scannerContext, Cell currentRowCell) throws IOException {
++    private boolean populateRowFromHeap(List<Cell> results, KeyValueHeap heap,
++        ScannerContext scannerContext, Cell currentRowCell, boolean isJoinedHeapOrNoJoinedHeap)
++        throws IOException {
+       Cell nextKv;
+       boolean moreCellsInRow = false;
+       boolean tmpKeepProgress = scannerContext.getKeepProgress();
+       // Scanning between column families and thus the scope is between cells
+       LimitScope limitScope = LimitScope.BETWEEN_CELLS;
++      while ((nextKv = heap.peek()) != null && compareRows(nextKv, currentRowCell) < 0) {
++        heap.next(MOCKED_LIST);
++      }
+       try {
+         do {
+           // We want to maintain any progress that is made towards the limits while scanning across
+           // different column families. To do this, we toggle the keep progress flag on during calls
+           // to the StoreScanner to ensure that any progress made thus far is not wiped away.
+-          scannerContext.setKeepProgress(true);
+-          heap.next(results, scannerContext);
+-          scannerContext.setKeepProgress(tmpKeepProgress);
+-
++          if (compareRows(nextKv, currentRowCell) == 0) {
++            scannerContext.setKeepProgress(true);
++            heap.next(results, scannerContext);
++            scannerContext.setKeepProgress(tmpKeepProgress);
++          }
+           nextKv = heap.peek();
+           moreCellsInRow = moreCellsInRow(nextKv, currentRowCell);
+-          if (!moreCellsInRow) incrementCountOfRowsScannedMetric(scannerContext);
++          boolean mustSetMidRowState = !isJoinedHeapOrNoJoinedHeap || moreCellsInRow;
+           if (scannerContext.checkBatchLimit(limitScope)) {
+             return scannerContext.setScannerState(NextState.BATCH_LIMIT_REACHED).hasMoreValues();
+           } else if (scannerContext.checkSizeLimit(limitScope)) {
+             ScannerContext.NextState state =
+-              moreCellsInRow? NextState.SIZE_LIMIT_REACHED_MID_ROW: NextState.SIZE_LIMIT_REACHED;
++                mustSetMidRowState ? NextState.SIZE_LIMIT_REACHED_MID_ROW : NextState.SIZE_LIMIT_REACHED;
+             return scannerContext.setScannerState(state).hasMoreValues();
+           } else if (scannerContext.checkTimeLimit(limitScope)) {
+             ScannerContext.NextState state =
+-              moreCellsInRow? NextState.TIME_LIMIT_REACHED_MID_ROW: NextState.TIME_LIMIT_REACHED;
++                mustSetMidRowState ? NextState.TIME_LIMIT_REACHED_MID_ROW : NextState.TIME_LIMIT_REACHED;
+             return scannerContext.setScannerState(state).hasMoreValues();
+           }
+         } while (moreCellsInRow);
+@@ -5751,6 +5776,42 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
+       return this.filter != null && this.filter.filterAllRemaining();
+     }
+ 
++    private int compareRows(Cell a, Cell b) {
++      if (a == null) {
++        if (b == null) {
++          return 0;
++        } else {
++          return 1;
++        }
++      } else {
++        if (b == null) {
++          return -1;
++        }
++      }
++      int c = this.comparator.compareRows(a, b);
++      return (this instanceof ReversedRegionScannerImpl) ? -c : c;
++    }
++
++    private int compareRows(Cell a, byte[] row) {
++      if (a == null) {
++        if (row == null) {
++          return 0;
++        } else {
++          return 1;
++        }
++      } else {
++        if (row == null) {
++          return -1;
++        }
++      }
++      int c = this.comparator.compareRows(a, row, 0, row.length);
++      return (this instanceof ReversedRegionScannerImpl) ? -c : c;
++    }
++
++    /**
++     * Main logic of region scanner. Should return when we should merge cells to one Result
++     * for rpc response.
++     */
+     private boolean nextInternal(List<Cell> results, ScannerContext scannerContext)
+         throws IOException {
+       if (!results.isEmpty()) {
+@@ -5767,19 +5828,18 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
+       int initialBatchProgress = scannerContext.getBatchProgress();
+       long initialSizeProgress = scannerContext.getSizeProgress();
+       long initialTimeProgress = scannerContext.getTimeProgress();
+-
+       // The loop here is used only when at some point during the next we determine
+       // that due to effects of filters or otherwise, we have an empty row in the result.
+       // Then we loop and try again. Otherwise, we must get out on the first iteration via return,
+       // "true" if there's more data to read, "false" if there isn't (storeHeap is at a stop row,
+       // and joinedHeap has no more data to read for the last row (if set, joinedContinuationRow).
+       while (true) {
++        assert results.isEmpty();
+         // Starting to scan a new row. Reset the scanner progress according to whether or not
+         // progress should be kept.
+         if (scannerContext.getKeepProgress()) {
+           // Progress should be kept. Reset to initial values seen at start of method invocation.
+-          scannerContext.setProgress(initialBatchProgress, initialSizeProgress,
+-            initialTimeProgress);
++          scannerContext.setProgress(initialBatchProgress, initialSizeProgress, initialTimeProgress);
+         } else {
+           scannerContext.clearProgress();
+         }
+@@ -5798,10 +5858,6 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
+           }
+         }
+ 
+-        // Let's see what we have in the storeHeap.
+-        Cell current = this.storeHeap.peek();
+-
+-        boolean stopRow = isStopRow(current);
+         // When has filter row is true it means that the all the cells for a particular row must be
+         // read before a filtering decision can be made. This means that filters where hasFilterRow
+         // run the risk of encountering out of memory errors in the case that they are applied to a
+@@ -5821,36 +5877,50 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
+           scannerContext.setTimeLimitScope(LimitScope.BETWEEN_ROWS);
+         }
+ 
+-        // Check if we were getting data from the joinedHeap and hit the limit.
+-        // If not, then it's main path - getting results from storeHeap.
+-        if (joinedContinuationRow == null) {
+-          // First, check if we are at a stop row. If so, there are no more results.
+-          if (stopRow) {
+-            if (hasFilterRow) {
+-              filter.filterRowCells(results);
+-            }
+-            return scannerContext.setScannerState(NextState.NO_MORE_VALUES).hasMoreValues();
+-          }
++        // We have two heaps here, storeHeap that should be filtered and joinedHeap that should not.
++        // There are 4 possible cases:
++        // 1) joinedHeap == null
++        //    In this case we need only scan storeHeap.
++        // 2) storeHeap.peek().getRow() <= joinedHeap.peak().getRow()
++        //    In this case we should scan storeHeap until its next cell's row is greater than
++        //      joinedHeap's next cell.
++        // 3) joinedHeap.peak().getRow() < storeHeap.peek().getRow()
++        //      && joinedHeap's next cell's row is half-read before
++        //    In this case we should scan joinedHeap first until its next cell's row is not less
++        //      than storeHeap's next cell.
++        // 4) joinedHeap.peak().getRow() < storeHeap.peek().getRow()
++        //      && joinedHeap's next cell's row is not read before
++        //    It means that joinedHeap has a row that storeHeap has not. We need skip this row.(?)
++        // NOTE: The comparing of row should consider reversed scanning.
++
++        // Let's see what we have in the two heaps.
++        Cell currentStoreHeapTop = this.storeHeap.peek();
++        Cell currentJoinedHeapTop = this.joinedHeap != null ? this.joinedHeap.peek() : null;
++
++
++        boolean stopRow = isStopRow();
++        if (stopRow) {
++          return scannerContext.setScannerState(NextState.NO_MORE_VALUES).hasMoreValues();
++        }
++        if (joinedHeap == null || compareRows(currentStoreHeapTop, currentJoinedHeapTop) <= 0) {
++          // Case 1 and 2.
++
++          joinedContinuationRow = currentStoreHeapTop;
++          // we should read form storeHeap until its row is larger than joinedHeap's
+ 
+           // Check if rowkey filter wants to exclude this row. If so, loop to next.
+           // Technically, if we hit limits before on this row, we don't need this call.
+-          if (filterRowKey(current)) {
+-            incrementCountOfRowsFilteredMetric(scannerContext);
+-            // Typically the count of rows scanned is incremented inside #populateResult. However,
+-            // here we are filtering a row based purely on its row key, preventing us from calling
+-            // #populateResult. Thus, perform the necessary increment here to rows scanned metric
+-            incrementCountOfRowsScannedMetric(scannerContext);
+-            boolean moreRows = nextRow(scannerContext, current);
++          if (filterRowKey(currentStoreHeapTop)) {
++            boolean moreRows = seekToNextRowForTwoHeaps(scannerContext, currentStoreHeapTop);
+             if (!moreRows) {
+               return scannerContext.setScannerState(NextState.NO_MORE_VALUES).hasMoreValues();
+             }
+-            results.clear();
+             continue;
+           }
+ 
+           // Ok, we are good, let's try to get some results from the main heap.
+-          populateResult(results, this.storeHeap, scannerContext, current);
+-
++          populateRowFromHeap(results, this.storeHeap, scannerContext, currentStoreHeapTop,
++              this.joinedHeap == null);
+           if (scannerContext.checkAnyLimitReached(LimitScope.BETWEEN_CELLS)) {
+             if (hasFilterRow) {
+               throw new IncompatibleFilterException(
+@@ -5860,24 +5930,18 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
+             return true;
+           }
+ 
+-          Cell nextKv = this.storeHeap.peek();
+-          stopRow = nextKv == null || isStopRow(nextKv);
+-          // save that the row was empty before filters applied to it.
+-          final boolean isEmptyRow = results.isEmpty();
+-
+           // We have the part of the row necessary for filtering (all of it, usually).
+           // First filter with the filterRow(List).
+           FilterWrapper.FilterRowRetCode ret = FilterWrapper.FilterRowRetCode.NOT_CALLED;
+           if (hasFilterRow) {
+             ret = filter.filterRowCellsWithRet(results);
+-
+             // We don't know how the results have changed after being filtered. Must set progress
+             // according to contents of results now. However, a change in the results should not
+             // affect the time progress. Thus preserve whatever time progress has been made
+             long timeProgress = scannerContext.getTimeProgress();
+             if (scannerContext.getKeepProgress()) {
+-              scannerContext.setProgress(initialBatchProgress, initialSizeProgress,
+-                initialTimeProgress);
++              scannerContext
++                  .setProgress(initialBatchProgress, initialSizeProgress, initialTimeProgress);
+             } else {
+               scannerContext.clearProgress();
+             }
+@@ -5888,60 +5952,29 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
+             }
+           }
+ 
+-          if (isEmptyRow || ret == FilterWrapper.FilterRowRetCode.EXCLUDE || filterRow()) {
+-            incrementCountOfRowsFilteredMetric(scannerContext);
+-            results.clear();
+-            boolean moreRows = nextRow(scannerContext, current);
++          if (results.isEmpty() || ret == FilterWrapper.FilterRowRetCode.EXCLUDE || filterRow()) {
++            boolean moreRows = seekToNextRowForTwoHeaps(scannerContext, currentStoreHeapTop);
+             if (!moreRows) {
+               return scannerContext.setScannerState(NextState.NO_MORE_VALUES).hasMoreValues();
+             }
+-
+-            // This row was totally filtered out, if this is NOT the last row,
+-            // we should continue on. Otherwise, nothing else to do.
+-            if (!stopRow) continue;
+-            return scannerContext.setScannerState(NextState.NO_MORE_VALUES).hasMoreValues();
++            results.clear();
++            continue;
+           }
+ 
+-          // Ok, we are done with storeHeap for this row.
+-          // Now we may need to fetch additional, non-essential data into row.
+-          // These values are not needed for filter to work, so we postpone their
+-          // fetch to (possibly) reduce amount of data loads from disk.
+-          if (this.joinedHeap != null) {
+-            boolean mayHaveData = joinedHeapMayHaveData(current);
+-            if (mayHaveData) {
+-              joinedContinuationRow = current;
+-              populateFromJoinedHeap(results, scannerContext);
+-
+-              if (scannerContext.checkAnyLimitReached(LimitScope.BETWEEN_CELLS)) {
+-                return true;
+-              }
+-            }
+-          }
+-        } else {
+-          // Populating from the joined heap was stopped by limits, populate some more.
++        }
++
++        // Ok, we are done with storeHeap for this row.
++        // Now we may need to fetch additional, non-essential data into row.
++        // These values are not needed for filter to work, so we postpone their
++        // fetch to (possibly) reduce amount of data loads from disk.
++        if (this.joinedHeap != null && joinedContinuationRow != null) {
++          // Case 3
+           populateFromJoinedHeap(results, scannerContext);
+           if (scannerContext.checkAnyLimitReached(LimitScope.BETWEEN_CELLS)) {
+             return true;
+           }
+         }
+-        // We may have just called populateFromJoinedMap and hit the limits. If that is
+-        // the case, we need to call it again on the next next() invocation.
+-        if (joinedContinuationRow != null) {
+-          return scannerContext.setScannerState(NextState.MORE_VALUES).hasMoreValues();
+-        }
+-
+-        // Finally, we are done with both joinedHeap and storeHeap.
+-        // Double check to prevent empty rows from appearing in result. It could be
+-        // the case when SingleColumnValueExcludeFilter is used.
+-        if (results.isEmpty()) {
+-          incrementCountOfRowsFilteredMetric(scannerContext);
+-          boolean moreRows = nextRow(scannerContext, current);
+-          if (!moreRows) {
+-            return scannerContext.setScannerState(NextState.NO_MORE_VALUES).hasMoreValues();
+-          }
+-          if (!stopRow) continue;
+-        }
+-
++        stopRow = isStopRow();
+         if (stopRow) {
+           return scannerContext.setScannerState(NextState.NO_MORE_VALUES).hasMoreValues();
+         } else {
+@@ -5972,8 +6005,14 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
+     private boolean joinedHeapMayHaveData(Cell currentRowCell)
+         throws IOException {
+       Cell nextJoinedKv = joinedHeap.peek();
+-      boolean matchCurrentRow =
+-          nextJoinedKv != null && CellUtil.matchingRow(nextJoinedKv, currentRowCell);
++      if (nextJoinedKv == null) {
++        return false;
++      }
++      if (currentRowCell == null) {
++        return true;
++      }
++      boolean matchCurrentRow = nextJoinedKv != null
++          && CellComparator.COMPARATOR.compareRows(nextJoinedKv, currentRowCell) <= 0;
+       boolean matchAfterSeek = false;
+ 
+       // If the next value in the joined heap does not match the current row, try to seek to the
+@@ -6007,25 +6046,32 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
+       return filter != null && filter.filterRowKey(current);
+     }
+ 
+-    protected boolean nextRow(ScannerContext scannerContext, Cell curRowCell) throws IOException {
+-      assert this.joinedContinuationRow == null: "Trying to go to next row during joinedHeap read.";
++    protected boolean seekToNextRowForTwoHeaps(ScannerContext scannerContext, Cell curRowCell) throws IOException {
+       Cell next;
+-      while ((next = this.storeHeap.peek()) != null &&
+-             CellUtil.matchingRow(next, curRowCell)) {
++      while ((next = this.storeHeap.peek()) != null && CellUtil.matchingRow(next, curRowCell)) {
+         this.storeHeap.next(MOCKED_LIST);
+       }
++      if (this.joinedHeap != null) {
++        while ((next = this.joinedHeap.peek()) != null
++            && comparator.compareRows(next, curRowCell) <= 0) {
++          this.joinedHeap.next(MOCKED_LIST);
++        }
++      }
+       resetFilters();
++      joinedContinuationRow = null;
++      incrementCountOfRowsScannedMetric(scannerContext);
++      incrementCountOfRowsFilteredMetric(scannerContext);
+ 
+       // Calling the hook in CP which allows it to do a fast forward
+-      return this.region.getCoprocessorHost() == null
+-          || this.region.getCoprocessorHost()
+-              .postScannerFilterRow(this, curRowCell);
++      return this.region.getCoprocessorHost() == null || this.region.getCoprocessorHost()
++          .postScannerFilterRow(this, curRowCell);
+     }
+ 
+-    protected boolean isStopRow(Cell currentRowCell) {
+-      return currentRowCell == null
+-          || (stopRow != null && comparator.compareRows(currentRowCell, stopRow, 0, stopRow
+-          .length) >= isScan);
++    protected boolean isStopRow() {
++      Cell currentStoreHeapCell = this.storeHeap.peek();
++      Cell currentJoinHeapCell = this.joinedHeap == null ? null : this.joinedHeap.peek();
++      return (currentStoreHeapCell == null || compareRows(currentStoreHeapCell, stopRow) >= isScan)
++          && (currentJoinHeapCell == null || compareRows(currentJoinHeapCell, stopRow) >= isScan);
+     }
+ 
+     @Override
+@@ -6107,6 +6153,19 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
+       // callback
+       this.close();
+     }
++
++    private boolean checkFilterHavingUnenssentialFamily(Scan scan, Set<byte[]> familySet) throws IOException {
++      if (scan.getFilter() == null) {
++        return false;
++      }
++      Filter filter = scan.getFilter();
++      for (byte[] family : familySet) {
++        if(!filter.isFamilyEssential(family)){
++          return true;
++        }
++      }
++      return false;
++    }
+   }
+ 
+   // Utility methods
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/RSRpcServices.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/RSRpcServices.java
+index 035b2d1..d162690 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/RSRpcServices.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/RSRpcServices.java
+@@ -72,11 +72,13 @@ import org.apache.hadoop.hbase.client.Scan;
+ import org.apache.hadoop.hbase.client.VersionInfoUtil;
+ import org.apache.hadoop.hbase.conf.ConfigurationObserver;
+ import org.apache.hadoop.hbase.exceptions.FailedSanityCheckException;
++import org.apache.hadoop.hbase.exceptions.IllegalArgumentIOException;
+ import org.apache.hadoop.hbase.exceptions.MergeRegionException;
+ import org.apache.hadoop.hbase.exceptions.OperationConflictException;
+ import org.apache.hadoop.hbase.exceptions.OutOfOrderScannerNextException;
+ import org.apache.hadoop.hbase.filter.ByteArrayComparable;
+ import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
++import org.apache.hadoop.hbase.filter.Filter;
+ import org.apache.hadoop.hbase.ipc.HBaseRPCErrorHandler;
+ import org.apache.hadoop.hbase.ipc.PayloadCarryingRpcController;
+ import org.apache.hadoop.hbase.ipc.PriorityFunction;
+@@ -483,6 +485,7 @@ public class RSRpcServices implements HBaseRPCErrorHandler,
+       for (Result res : results) {
+         builder.addCellsPerResult(res.size());
+         builder.addPartialFlagPerResult(res.isPartial());
++        builder.addShouldSortFlagPerResult(res.isNotSorted());
+       }
+       ((PayloadCarryingRpcController)controller).
+         setCellScanner(CellUtil.createCellScanner(results));
+@@ -2761,7 +2764,8 @@ public class RSRpcServices implements HBaseRPCErrorHandler,
+ 
+                   if (!values.isEmpty()) {
+                     final boolean partial = scannerContext.partialResultFormed();
+-                    Result r = Result.create(values, null, stale, partial);
++                    Result r = Result.create(values, null, stale, partial,
++                        partial && scanner.hasUnenssentialFamily());
+                     lastBlock = addSize(context, r, lastBlock);
+                     results.add(r);
+                     i++;
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/RegionScanner.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/RegionScanner.java
+index 5b33db4..890b91b 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/RegionScanner.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/RegionScanner.java
+@@ -115,4 +115,10 @@ public interface RegionScanner extends InternalScanner, Shipper {
+    */
+   boolean nextRaw(List<Cell> result, ScannerContext scannerContext)
+       throws IOException;
++
++  /**
++   *
++   * @return true if this scan has unenssentialFamily so this scanner will use joinedHeap
++   */
++  boolean hasUnenssentialFamily();
+ }
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/ReversedRegionScannerImpl.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/ReversedRegionScannerImpl.java
+index ca09cdc..913262b 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/ReversedRegionScannerImpl.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/regionserver/ReversedRegionScannerImpl.java
+@@ -58,20 +58,19 @@ class ReversedRegionScannerImpl extends RegionScannerImpl {
+   }
+ 
+   @Override
+-  protected boolean isStopRow(Cell currentRowCell) {
+-    return currentRowCell == null
+-        || (super.stopRow != null && comparator.compareRows(currentRowCell, stopRow, 0,
+-            stopRow.length) <= super.isScan);
+-  }
+-
+-  @Override
+-  protected boolean nextRow(ScannerContext scannerContext, Cell curRowCell)
++  protected boolean seekToNextRowForTwoHeaps(ScannerContext scannerContext, Cell curRowCell)
+       throws IOException {
+-    assert super.joinedContinuationRow == null : "Trying to go to next row during joinedHeap read.";
++    if (curRowCell == null) {
++      return false;
++    }
+     byte[] row = new byte[curRowCell.getRowLength()];
+     CellUtil.copyRowTo(curRowCell, row, 0);
+     this.storeHeap.seekToPreviousRow(KeyValueUtil.createFirstOnRow(row));
++    if (this.joinedHeap != null) {
++      this.joinedHeap.seekToPreviousRow(KeyValueUtil.createFirstOnRow(row));
++    }
+     resetFilters();
++    incrementCountOfRowsScannedMetric(scannerContext);
+     // Calling the hook in CP which allows it to do a fast forward
+     if (this.region.getCoprocessorHost() != null) {
+       return this.region.getCoprocessorHost().postScannerFilterRow(this, curRowCell);
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/TestPartialResultsFromClientSide.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/TestPartialResultsFromClientSide.java
+index a6f8373..df35fed 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/TestPartialResultsFromClientSide.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/TestPartialResultsFromClientSide.java
+@@ -17,6 +17,7 @@
+  */
+ package org.apache.hadoop.hbase;
+ 
++import static org.junit.Assert.assertArrayEquals;
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertFalse;
+ import static org.junit.Assert.assertTrue;
+@@ -37,9 +38,11 @@ import org.apache.hadoop.hbase.client.Result;
+ import org.apache.hadoop.hbase.client.ResultScanner;
+ import org.apache.hadoop.hbase.client.Scan;
+ import org.apache.hadoop.hbase.client.Table;
++import org.apache.hadoop.hbase.exceptions.IllegalArgumentIOException;
+ import org.apache.hadoop.hbase.filter.ColumnPrefixFilter;
+ import org.apache.hadoop.hbase.filter.ColumnRangeFilter;
+ import org.apache.hadoop.hbase.filter.Filter;
++import org.apache.hadoop.hbase.filter.FilterBase;
+ import org.apache.hadoop.hbase.filter.FirstKeyOnlyFilter;
+ import org.apache.hadoop.hbase.filter.FirstKeyValueMatchingQualifiersFilter;
+ import org.apache.hadoop.hbase.filter.RandomRowFilter;
+@@ -463,7 +466,7 @@ public class TestPartialResultsFromClientSide {
+         partials.add(partialResult);
+       } while (partialResult != null && partialResult.isPartial());
+ 
+-      completeResult = Result.createCompleteResult(partials);
++      completeResult = Result.createCompleteResult(partials, null);
+       oneShotResult = oneShotScanner.next();
+ 
+       compareResults(completeResult, oneShotResult, null);
+@@ -496,7 +499,7 @@ public class TestPartialResultsFromClientSide {
+     assertFalse(Bytes.equals(r1.getRow(), r2.getRow()));
+ 
+     try {
+-      Result.createCompleteResult(partials);
++      Result.createCompleteResult(partials, null);
+       fail("r1 and r2 are from different rows. It should not be possible to combine them into"
+           + " a single result");
+     } catch (IOException e) {
+@@ -829,4 +832,89 @@ public class TestPartialResultsFromClientSide {
+       testEquivalenceOfScanResults(TABLE, partialScan, oneshotScan);
+     }
+   }
++
++
++  public static class EssentialFilter extends FilterBase {
++
++    @Override
++    public ReturnCode filterKeyValue(Cell v) throws IOException {
++      return ReturnCode.INCLUDE;
++    }
++
++    public boolean isFamilyEssential(byte[] cf){
++      return Bytes.equals(cf,FAMILIES[1]);
++    }
++
++    public static Filter parseFrom(final byte [] pbBytes){
++      return new EssentialFilter();
++    }
++
++  }
++
++  private void assertCell(Cell cell, byte[] row, byte[] cf, byte[] cq) {
++    try {
++      assertArrayEquals(row, Bytes.copy(cell.getRowArray(), cell.getRowOffset(), cell.getRowLength()));
++      assertArrayEquals(cf, Bytes.copy(cell.getFamilyArray(), cell.getFamilyOffset(), cell.getFamilyLength()));
++      assertArrayEquals(cq,
++          Bytes.copy(cell.getQualifierArray(), cell.getQualifierOffset(), cell.getQualifierLength()));
++    } catch (AssertionError e) {
++      throw new AssertionError(
++          "expected " + Bytes.toString(row) + "/" + Bytes.toString(cf) + ":" + Bytes.toString(cq)
++              + " but was:" + cell.toString());
++    }
++  }
++
++  @Test
++  public void testEssentialHeapOrderForCompleteRow() throws IOException {
++    Table table =
++        createTestTable(TableName.valueOf("testEssentialHeapOrderForCompleteRow"), ROWS, FAMILIES,
++            QUALIFIERS, VALUE);
++    Scan scan = new Scan();
++    scan.setFilter(new EssentialFilter());
++    scan.setMaxResultSize(1);
++    ResultScanner scanner = table.getScanner(scan);
++    for (int i = 0; i < NUM_ROWS; i++) {
++      Result result = scanner.next();
++      assertFalse(result.isPartial());
++      Cell[] row = result.rawCells();
++      assertEquals(NUM_FAMILIES * NUM_QUALIFIERS, row.length);
++      for (int j = 0; j < NUM_FAMILIES; j++) {
++        for (int k = 0; k < NUM_QUALIFIERS; k++) {
++          assertCell(row[j * NUM_FAMILIES + k], ROWS[i], FAMILIES[j], QUALIFIERS[k]);
++        }
++      }
++    }
++    assertTrue(scanner.next() == null);
++  }
++
++  @Test
++  public void testEssentialHeapOrderForPartialRow() throws IOException {
++    Table table =
++        createTestTable(TableName.valueOf("testEssentialHeapOrderForPartialRow"), ROWS, FAMILIES,
++            QUALIFIERS, VALUE);
++    Scan scan = new Scan();
++    scan.setFilter(new EssentialFilter());
++    scan.setMaxResultSize(1);
++    scan.setAllowPartialResults(true);
++    try {
++      ResultScanner scanner = table.getScanner(scan);
++      for (int i = 0; i < NUM_ROWS; i++) {
++        Result result = scanner.next();
++        assertFalse(result.isPartial());
++        Cell[] row = result.rawCells();
++        assertEquals(NUM_FAMILIES * NUM_QUALIFIERS, row.length);
++        for (int j = 0; j < NUM_FAMILIES; j++) {
++          for (int k = 0; k < NUM_QUALIFIERS; k++) {
++            assertCell(row[j * NUM_FAMILIES + k], ROWS[i], FAMILIES[j], QUALIFIERS[k]);
++          }
++        }
++      }
++      assertTrue(scanner.next() == null);
++    } catch (DoNotRetryIOException e) {
++      // expected
++      return;
++    }
++    throw new IOException("we expect there can be not reached");
++  }
++
+ }
+\ No newline at end of file
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/client/TestBlockEvictionFromClient.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/client/TestBlockEvictionFromClient.java
+index d3f718b..f0a10f7 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/client/TestBlockEvictionFromClient.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/client/TestBlockEvictionFromClient.java
+@@ -1518,6 +1518,10 @@ public class TestBlockEvictionFromClient {
+       return nextRaw;
+     }
+ 
++    @Override public boolean hasUnenssentialFamily() {
++      return false;
++    }
++
+     @Override
+     public void close() throws IOException {
+       delegate.close();
+diff --git a/hbase-server/src/test/java/org/apache/hadoop/hbase/coprocessor/TestCoprocessorInterface.java b/hbase-server/src/test/java/org/apache/hadoop/hbase/coprocessor/TestCoprocessorInterface.java
+index b2ef1bd..2bf2916 100644
+--- a/hbase-server/src/test/java/org/apache/hadoop/hbase/coprocessor/TestCoprocessorInterface.java
++++ b/hbase-server/src/test/java/org/apache/hadoop/hbase/coprocessor/TestCoprocessorInterface.java
+@@ -110,6 +110,10 @@ public class TestCoprocessorInterface {
+       return delegate.nextRaw(result, context);
+     }
+ 
++    @Override public boolean hasUnenssentialFamily() {
++      return false;
++    }
++
+     @Override
+     public void close() throws IOException {
+       delegate.close();
+-- 
+2.5.4 (Apple Git-61)
+

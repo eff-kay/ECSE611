@@ -1,0 +1,31 @@
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/procedure/ServerCrashProcedure.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/procedure/ServerCrashProcedure.java
+index 048bca8002..075e06e029 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/procedure/ServerCrashProcedure.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/procedure/ServerCrashProcedure.java
+@@ -365,15 +365,22 @@ public class ServerCrashProcedure
+       RegionStateNode regionNode = am.getRegionStates().getOrCreateRegionStateNode(region);
+       regionNode.lock();
+       try {
+-        if (regionNode.getProcedure() != null) {
+-          LOG.info("{} found RIT {}; {}", this, regionNode.getProcedure(), regionNode);
+-          regionNode.getProcedure().serverCrashed(env, regionNode, getServerName());
++        // It's possible that this region was being opened on the dead server and, the open having
++        // failed conclusively, the RIT has retried with a different server. It would then be on a
++        // different server, either opening or already opened.
++        TransitRegionStateProcedure proc = regionNode.getProcedure();
++        ServerName loc = regionNode.getRegionLocation();
++        if (loc != null && !loc.equals(serverName)) {
++          LOG.info("{} is no longer on {}; not touching RIT {}", regionNode, serverName, proc);
++        } else if (proc != null) {
++          LOG.info("{} found RIT {}; {}", this, proc, regionNode);
++          proc.serverCrashed(env, regionNode, getServerName());
+         } else {
+           if (env.getMasterServices().getTableStateManager().isTableState(regionNode.getTable(),
+             TableState.State.DISABLING, TableState.State.DISABLED)) {
+             continue;
+           }
+-          TransitRegionStateProcedure proc = TransitRegionStateProcedure.assign(env, region, null);
++          proc = TransitRegionStateProcedure.assign(env, region, null);
+           regionNode.setProcedure(proc);
+           addChildProcedure(proc);
+         }

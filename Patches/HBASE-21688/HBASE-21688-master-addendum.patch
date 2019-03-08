@@ -1,0 +1,49 @@
+From 8c90d7e31d828502130b2eb7dc31091dd4ed5ba6 Mon Sep 17 00:00:00 2001
+From: Vladimir Rodionov <vrodionov@apache.org>
+Date: Wed, 20 Feb 2019 16:09:35 -0800
+Subject: [PATCH] HBASE-21688:Address WAL filesystem issues
+
+---
+ .../java/org/apache/hadoop/hbase/master/MasterWalManager.java | 3 +--
+ .../org/apache/hadoop/hbase/wal/AbstractFSWALProvider.java    | 4 ++--
+ 2 files changed, 3 insertions(+), 4 deletions(-)
+
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/MasterWalManager.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/MasterWalManager.java
+index 8fdcb17cf5..14be195c29 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/master/MasterWalManager.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/master/MasterWalManager.java
+@@ -189,8 +189,7 @@ public class MasterWalManager {
+    */
+   public FileStatus[] getWALDirPaths(final PathFilter filter) throws IOException {
+     Path walDirPath = new Path(CommonFSUtils.getWALRootDir(conf), HConstants.HREGION_LOGDIR_NAME);
+-    FileStatus[] walDirForServerNames = FSUtils.listStatus(
+-        CommonFSUtils.getWALFileSystem(conf), walDirPath, filter);
++    FileStatus[] walDirForServerNames = FSUtils.listStatus(fs, walDirPath, filter);
+     return walDirForServerNames == null? new FileStatus[0]: walDirForServerNames;
+   }
+ 
+diff --git a/hbase-server/src/main/java/org/apache/hadoop/hbase/wal/AbstractFSWALProvider.java b/hbase-server/src/main/java/org/apache/hadoop/hbase/wal/AbstractFSWALProvider.java
+index 1f24548cb9..8741c1c8c6 100644
+--- a/hbase-server/src/main/java/org/apache/hadoop/hbase/wal/AbstractFSWALProvider.java
++++ b/hbase-server/src/main/java/org/apache/hadoop/hbase/wal/AbstractFSWALProvider.java
+@@ -432,7 +432,7 @@ public abstract class AbstractFSWALProvider<T extends AbstractFSWAL<?>> implemen
+    * @throws IOException exception
+    */
+   public static Path getArchivedLogPath(Path path, Configuration conf) throws IOException {
+-    Path rootDir = FSUtils.getRootDir(conf);
++    Path rootDir = FSUtils.getWALRootDir(conf);
+     Path oldLogDir = new Path(rootDir, HConstants.HREGION_OLDLOGDIR_NAME);
+     if (conf.getBoolean(SEPARATE_OLDLOGDIR, DEFAULT_SEPARATE_OLDLOGDIR)) {
+       ServerName serverName = getServerNameFromWALDirectoryName(path);
+@@ -443,7 +443,7 @@ public abstract class AbstractFSWALProvider<T extends AbstractFSWAL<?>> implemen
+       oldLogDir = new Path(oldLogDir, serverName.getServerName());
+     }
+     Path archivedLogLocation = new Path(oldLogDir, path.getName());
+-    final FileSystem fs = FSUtils.getCurrentFileSystem(conf);
++    final FileSystem fs = FSUtils.getWALFileSystem(conf);
+ 
+     if (fs.exists(archivedLogLocation)) {
+       LOG.info("Log " + path + " was moved to " + archivedLogLocation);
+-- 
+2.17.2 (Apple Git-113)
+
