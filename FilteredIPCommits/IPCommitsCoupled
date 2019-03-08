@@ -41,12 +41,5 @@ def fileParse(filepath):
 
     pp.pprint(ipCommits)
 
-    # for defectNum in mapID.keys():
-    #         path = prefix + [defectNum]
-    #         if not isinstance(mapID[defectNum], dict):
-    #             print(os.path.join(*path))
-    #         else:
-    #             get_files(mapID[defectNum], path)
-    # pp.pprint(mapID)
 
 fileParse("log.txt")

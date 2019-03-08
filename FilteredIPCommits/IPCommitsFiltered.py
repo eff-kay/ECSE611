@@ -20,9 +20,6 @@ def fileParse(filepath):
         pp = pprint.PrettyPrinter(indent=4)
 
         # pp.pprint(initial)
-        if not lastDefectNum == '':
-            mapID[lastDefectNum][-1] = (mapID[lastDefectNum][-1][0], commit)
-
 
         if not defectNum.isupper or not re.match(r'[H]',defectNum):
             unusedArray.append(defectNum)
