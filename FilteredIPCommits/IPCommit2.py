@@ -36,7 +36,7 @@ def fileParse(filepath):
             lastDefectNum = defectNum
 
     for key, val in mapID.items():
-       if key.isupper and re.match(r'[H]', key) and len(val) > 1:
+       if key.isupper() and re.match(r'[H]', key) and len(val) > 1:
         ipCommits[key] = val
 
     pp.pprint(ipCommits)
