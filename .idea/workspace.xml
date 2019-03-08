@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ChangeListManager">
     <list default="true" id="fb6faabe-7bef-48f4-86b1-c34e2cd9720e" name="Default Changelist" comment="">
-      <change beforePath="$PROJECT_DIR$/FilteredIPCommits/IPCommitsFiltered.py" beforeDir="false" afterPath="$PROJECT_DIR$/FilteredIPCommits/IPCommitsFiltered.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
     </list>
     <option name="EXCLUDED_CONVERTED_TO_IGNORED" value="true" />
     <option name="SHOW_DIALOG" value="false" />
@@ -12,11 +12,11 @@
   </component>
   <component name="FileEditorManager">
     <leaf SIDE_TABS_SIZE_LIMIT_KEY="300">
-      <file pinned="false" current-in-tab="false">
-        <entry file="file://$PROJECT_DIR$/FilteredIPCommits/IPCommitsFiltered.py">
+      <file pinned="false" current-in-tab="true">
+        <entry file="file://$PROJECT_DIR$/FilteredIPCommits/IPCommit2.py">
           <provider selected="true" editor-type-id="text-editor">
-            <state relative-caret-position="75">
-              <caret line="5" column="24" lean-forward="true" selection-end-line="52" />
+            <state relative-caret-position="282">
+              <caret line="43" lean-forward="true" selection-start-line="43" selection-end-line="43" />
               <folding>
                 <element signature="e#0#13#0" expanded="true" />
               </folding>
@@ -24,11 +24,11 @@
           </provider>
         </entry>
       </file>
-      <file pinned="false" current-in-tab="true">
+      <file pinned="false" current-in-tab="false">
         <entry file="file://$PROJECT_DIR$/FilteredIPCommits/IPCommitsCoupled">
           <provider selected="true" editor-type-id="text-editor">
-            <state relative-caret-position="255">
-              <caret line="17" lean-forward="true" selection-start-line="17" selection-end-line="17" />
+            <state relative-caret-position="765">
+              <caret line="51" column="20" lean-forward="true" selection-start-line="51" selection-start-column="20" selection-end-line="51" selection-end-column="20" />
               <folding>
                 <element signature="e#0#13#0" expanded="true" />
               </folding>
@@ -39,17 +39,8 @@
       <file pinned="false" current-in-tab="false">
         <entry file="file://$PROJECT_DIR$/FilteredIPCommits/log.txt">
           <provider selected="true" editor-type-id="text-editor">
-            <state relative-caret-position="114">
-              <caret line="16120" column="54" selection-start-line="16120" selection-start-column="43" selection-end-line="16120" selection-end-column="54" />
-            </state>
-          </provider>
-        </entry>
-      </file>
-      <file pinned="false" current-in-tab="false">
-        <entry file="file://$PROJECT_DIR$/FilteredIPCommits/log2.txt">
-          <provider selected="true" editor-type-id="text-editor">
-            <state relative-caret-position="75">
-              <caret line="5" column="26" selection-start-line="5" selection-start-column="26" selection-end-line="5" selection-end-column="26" />
+            <state relative-caret-position="259">
+              <caret line="16128" column="86" lean-forward="true" selection-start-line="16128" selection-start-column="86" selection-end-line="16128" selection-end-column="86" />
             </state>
           </provider>
         </entry>
@@ -65,20 +56,36 @@
   </component>
   <component name="FindInProjectRecents">
     <findStrings>
-      <find>Attempted</find>
-      <find>Better</find>
-      <find>c3f3ee3bc43b3c14d61806f799382c9c06a49d6</find>
-      <find>map</find>
-      <find>Revert</find>
-      <find>10044</find>
-      <find>10079</find>
-      <find>584793fb6f24dbc5bce0a8fa02a55773e89f7d</find>
-      <find>3fb88f10afe05617baab184fe459</find>
-      <find>00b0288c96853b8d7879024b2143592e3c33da3</find>
-      <find>f572c4b80e2bef91f582ed5b535c4ba</find>
-      <find>10134</find>
-      <find>a28881da2d91b7a6440031b50e9de90ceb8</find>
       <find>5fbbef29f307d3b5a8ddc1bfd8506</find>
+      <find>hadoop</find>
+      <find>6f42c1f60f8571c0d6fdb6e54be3fe2b6df0711c</find>
+      <find>Exception</find>
+      <find>hadoop-1375</find>
+      <find>HADOOP-1375</find>
+      <find>1375</find>
+      <find>ff53d753301dc4d813f58efb0422552f13b43e7f</find>
+      <find>&amp;=&amp;Ex</find>
+      <find>f613907a98a732364c5a2a5f1f4ece7bc99f555e</find>
+      <find>&amp;=&amp;E</find>
+      <find>7335f5f87ddc066b5f12a396ccf44448736a217d</find>
+      <find>&amp;=&amp;e</find>
+      <find>&amp;=&amp;ex</find>
+      <find>&amp;=&amp;edit</find>
+      <find>&amp;=&amp;Exc</find>
+      <find>b93724dd8a9acade0ffef90bc60fbb35f15cc0</find>
+      <find>87f5d5dffd96e09d789a9063f8f6d98a75fb24dd</find>
+      <find>exception</find>
+      <find>Excep</find>
+      <find>e23a50b0d2415757f9fb18546fe4b340e34d2199'</find>
+      <find>641c87ddf93f88758b5db0b5b506ec53dc826a62</find>
+      <find>89af8294f42a9a16b91a09f7808653a71648718f</find>
+      <find>hbase</find>
+      <find>update</find>
+      <find>bb71446e1556a9cfd4071f64bab63a52b6ee14c2</find>
+      <find>e23a50b0d2415757f9fb18546fe4b340e34d2199</find>
+      <find>184c5c2903d5f285ecbe65761a42c39a34d817d</find>
+      <find>-1375</find>
+      <find>HADOOP-1391</find>
     </findStrings>
   </component>
   <component name="Git.Settings">
@@ -90,11 +97,12 @@
         <option value="$PROJECT_DIR$/FilteredIPCommits/log2.txt" />
         <option value="$PROJECT_DIR$/FilteredIPCommits/IPCommitsFiltered.py" />
         <option value="$PROJECT_DIR$/FilteredIPCommits/IPCommitsCoupled" />
+        <option value="$PROJECT_DIR$/FilteredIPCommits/log.txt" />
+        <option value="$PROJECT_DIR$/FilteredIPCommits/test.py" />
       </list>
     </option>
   </component>
-  <component name="ProjectFrameBounds" extendedState="6">
-    <option name="x" value="-23" />
+  <component name="ProjectFrameBounds">
     <option name="y" value="23" />
     <option name="width" value="1440" />
     <option name="height" value="877" />
@@ -105,7 +113,6 @@
       <foldersAlwaysOnTop value="true" />
     </navigator>
     <panes>
-      <pane id="ProjectPane" />
       <pane id="Scope">
         <subPane subId="Scope 'Project Files'; set:Project Files; class com.intellij.psi.search.scope.ProjectFilesScope">
           <expand>
@@ -127,6 +134,7 @@
           <select />
         </subPane>
       </pane>
+      <pane id="ProjectPane" />
     </panes>
   </component>
   <component name="PropertiesComponent">
@@ -150,7 +158,7 @@
       </list>
     </option>
   </component>
-  <component name="RunManager">
+  <component name="RunManager" selected="Python.test">
     <configuration name="IPCommitsFiltered" type="PythonConfigurationType" factoryName="Python" temporary="true">
       <module name="ECSE611" />
       <option name="INTERPRETER_OPTIONS" value="" />
@@ -172,8 +180,30 @@
       <option name="INPUT_FILE" value="" />
       <method v="2" />
     </configuration>
+    <configuration name="test" type="PythonConfigurationType" factoryName="Python" temporary="true">
+      <module name="ECSE611" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/FilteredIPCommits" />
+      <option name="IS_MODULE_SDK" value="false" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/FilteredIPCommits/IPCommit2.py" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
     <recent_temporary>
       <list>
+        <item itemvalue="Python.test" />
         <item itemvalue="Python.IPCommitsFiltered" />
       </list>
     </recent_temporary>
@@ -193,13 +223,14 @@
   </component>
   <component name="ToolWindowManager">
     <frame x="0" y="23" width="1440" height="877" extended-state="6" />
+    <editor active="true" />
     <layout>
-      <window_info content_ui="combo" id="Project" order="0" visible="true" weight="0.18675123" />
+      <window_info active="true" content_ui="combo" id="Project" order="0" visible="true" weight="0.18675123" />
       <window_info id="Structure" order="1" side_tool="true" weight="0.25" />
       <window_info id="Favorites" order="2" side_tool="true" />
       <window_info anchor="bottom" id="Message" order="0" />
       <window_info anchor="bottom" id="Find" order="1" />
-      <window_info active="true" anchor="bottom" id="Run" order="2" visible="true" weight="0.25987262" />
+      <window_info anchor="bottom" id="Run" order="2" visible="true" weight="0.38726115" />
       <window_info anchor="bottom" id="Debug" order="3" weight="0.4" />
       <window_info anchor="bottom" id="Cvs" order="4" weight="0.25" />
       <window_info anchor="bottom" id="Inspection" order="5" weight="0.4" />
@@ -263,6 +294,16 @@
         </state>
       </provider>
     </entry>
+    <entry file="file://$PROJECT_DIR$/FilteredIPCommits/IPCommitsFiltered.py">
+      <provider selected="true" editor-type-id="text-editor">
+        <state relative-caret-position="349">
+          <caret line="27" selection-start-line="27" selection-end-line="27" />
+          <folding>
+            <element signature="e#0#13#0" expanded="true" />
+          </folding>
+        </state>
+      </provider>
+    </entry>
     <entry file="file://$PROJECT_DIR$/FilteredIPCommits/log2.txt">
       <provider selected="true" editor-type-id="text-editor">
         <state relative-caret-position="75">
@@ -272,25 +313,25 @@
     </entry>
     <entry file="file://$PROJECT_DIR$/FilteredIPCommits/log.txt">
       <provider selected="true" editor-type-id="text-editor">
-        <state relative-caret-position="114">
-          <caret line="16120" column="54" selection-start-line="16120" selection-start-column="43" selection-end-line="16120" selection-end-column="54" />
+        <state relative-caret-position="259">
+          <caret line="16128" column="86" lean-forward="true" selection-start-line="16128" selection-start-column="86" selection-end-line="16128" selection-end-column="86" />
         </state>
       </provider>
     </entry>
-    <entry file="file://$PROJECT_DIR$/FilteredIPCommits/IPCommitsFiltered.py">
+    <entry file="file://$PROJECT_DIR$/FilteredIPCommits/IPCommitsCoupled">
       <provider selected="true" editor-type-id="text-editor">
-        <state relative-caret-position="75">
-          <caret line="5" column="24" lean-forward="true" selection-end-line="52" />
+        <state relative-caret-position="765">
+          <caret line="51" column="20" lean-forward="true" selection-start-line="51" selection-start-column="20" selection-end-line="51" selection-end-column="20" />
           <folding>
             <element signature="e#0#13#0" expanded="true" />
           </folding>
         </state>
       </provider>
     </entry>
-    <entry file="file://$PROJECT_DIR$/FilteredIPCommits/IPCommitsCoupled">
+    <entry file="file://$PROJECT_DIR$/FilteredIPCommits/IPCommit2.py">
       <provider selected="true" editor-type-id="text-editor">
-        <state relative-caret-position="255">
-          <caret line="17" lean-forward="true" selection-start-line="17" selection-end-line="17" />
+        <state relative-caret-position="282">
+          <caret line="43" lean-forward="true" selection-start-line="43" selection-end-line="43" />
           <folding>
             <element signature="e#0#13#0" expanded="true" />
           </folding>
