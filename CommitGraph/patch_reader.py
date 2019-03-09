@@ -124,16 +124,14 @@ if __name__ == '__main__':
 
     patch = get_patch(
             'hbase',
-            '87f5d5dffd96e09d789a9063f8f6d98a75fb24dd',
-            '6f42c1f60f8571c0d6fdb6e54be3fe2b6df0711c')
+            '2e49c9451bb1867454a7e16074ba8ba913872f2f',
+            'a3073cc6dacc03756387a788de62498f1a64a411')
 
     ps = PatchSplitter('hbase',
-            '87f5d5dffd96e09d789a9063f8f6d98a75fb24dd',
-            '6f42c1f60f8571c0d6fdb6e54be3fe2b6df0711c')
+            '2e49c9451bb1867454a7e16074ba8ba913872f2f',
+            'a3073cc6dacc03756387a788de62498f1a64a411')
 
     patches = ps.split_by_diff_section(patch)
     methods = ps.all_modified_methods(patches)
 
-
     print(methods)
-

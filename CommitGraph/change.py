@@ -51,7 +51,9 @@ class Change:
             repo_name,
             getter=MethodGetter,
             function_checker=FunctionChecker,
-            class_checker=ClassChecker):
+            class_checker=ClassChecker,
+            method_checker=MethodChecker,
+            ):
 
         self.changeline = changeline
         self.changes = [change for change in changes.split('\n')]
@@ -63,6 +65,7 @@ class Change:
 
         self.function_checker = function_checker
         self.class_checker = class_checker
+        self.method_checker = method_checker
 
         self.getter = getter(
                 changeline=self.changeline,
@@ -177,15 +180,27 @@ class Change:
             if self._blatently_invalid_changes(line):
                 continue
 
-            function_checker = self.function_checker(line)
-            class_checker = self.class_checker(line)
+            def check(line):
+                function_checker = self.function_checker(line)
+                method_checker = self.method_checker(line)
+                class_checker = self.class_checker(line)
 
-            if (not function_checker.is_function) and (not class_checker.is_class):
+                if not any([class_checker, function_checker, method_checker]):
+                    return None, None
+
+                if class_checker:
+                    return class_checker.class_signature, 'class'
+
+                if function_checker:
+                    return function_checker.function_signature, 'function'
+
+                if method_checker:
+                    return method_checker.method_signature, 'method'
+
+            signature, change_type = check(line)
+
+            if signature is None:
                 continue
-
-            signature = class_checker.class_signature or function_checker.function_signature
-
-            change_type = 'class' if class_checker else 'method'
 
             changed_line = self.ChangedLine(
                 line=line,
