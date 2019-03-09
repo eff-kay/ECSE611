@@ -85,9 +85,24 @@ class Change:
             return [abs(int(c)) for c in source_file_changeline.split(',')]
 
         changeline = self.changeline.lstrip(' ').rstrip(' ')
-        source_file_changeline, target_file_changeline = changeline.split(' ')
-        sf_starts_at, sf_total = to_int(source_file_changeline)
-        tf_starts_at, tf_total = to_int(target_file_changeline)
+        temp_store = changeline.split(' ')
+        source_file_changeline = temp_store[0] if len(temp_store)==2 else '0,0'
+        target_file_changeline = temp_store[1] if len(temp_store)==2 else '0,0'
+        tempVal = to_int(source_file_changeline)
+        tempVal1 = to_int(target_file_changeline)
+        if len(tempVal)>1:
+            sf_starts_at = tempVal[0]
+            sf_total = tempVal[1]
+        else:
+            sf_starts_at = 0
+            sf_total = 0
+
+        if len(tempVal1) > 1:
+            tf_starts_at = tempVal1[0]
+            tf_total = tempVal1[1]
+        else:
+            tf_starts_at = 0
+            tf_total = 0
 
         return sf_starts_at, sf_total, tf_starts_at, tf_total
 

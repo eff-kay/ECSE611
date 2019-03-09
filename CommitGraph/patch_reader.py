@@ -60,8 +60,8 @@ class PatchSection:
         self._lines_modified_with_changes = self._split_into_pairs(lines_modified_with_changes)
 
         self.chunks = [Change(
-            changeline=lm[0],
-            changes=lm[1],
+            changeline=lm[0] if len(lm)>0 else "",
+            changes=lm[1] if len(lm)>1 else "",
             filename=self.filename,
             commit=self.commit,
             parent_commit=self.parent_commit,
