@@ -64,20 +64,45 @@ def normalizeMethodNames(name):
 	tempStr = ''.join(name.split(' '))
 
 	tempStr = tempStr.split('(')
-
-	leftName = tempStr[0]
-	params = tempStr[1].split(')')[0]
-	rightName = tempStr[1].split(')')[1]
-	count= params.count('<')
-	params = params.replace(',','', count)
-	params = params.split(',')
-	strParams = ''.join(params)
-	if params==['']:
-		finalParamCount=0
+	if tempStr[0]=='while':
+		return 'while(1)'
+	if tempStr[0]=='if':
+		return 'if(1)'
+	elif tempStr[1]=='':
+		leftName = tempStr[0]
+		params = tempStr[2].split(')')[0]
+		try:
+			rightName = tempStr[2].split(')')[2]
+		except IndexError:
+			rightName=''
+		count = params.count('<')
+		params = params.replace(',', '', count)
+		params = params.split(',')
+		strParams = ''.join(params)
+		if params == ['']:
+			finalParamCount = 0
+		else:
+			finalParamCount = len(params)
+		finalName = leftName + '(' + str(finalParamCount) + ')' + rightName
+		return finalName
 	else:
-		finalParamCount = len(params)
-	finalName = leftName+'('+str(finalParamCount)+')'+rightName
-	return finalName
+		leftName = tempStr[0]
+		params = tempStr[1].split(')')[0]
+		try:
+			rightName = tempStr[1].split(')')[1]
+		except IndexError:
+			rightName=''
+
+		count= params.count('<')
+		params = params.replace(',','', count)
+		params = params.split(',')
+		strParams = ''.join(params)
+		if params==['']:
+			finalParamCount=0
+		else:
+			finalParamCount = len(params)
+		finalName = leftName+'('+str(finalParamCount)+')'+rightName
+		return finalName
 
 def encryptNode(node, hashForNodes):
 	if node.split("==")[-1]==hashForNodes:
@@ -86,6 +111,17 @@ def encryptNode(node, hashForNodes):
 		node = normalizeMethodNames(node)
 		node= node+"=="+hashForNodes
 		return node
+
+
+def checkForIfWhile(name):
+	tempStr = ''.join(name.split(' '))
+	tempStr = tempStr.split('(')
+
+	if tempStr[0]=='if':
+		return True
+	if tempStr[0]=='while':
+		return True
+
 
 
 def createGraph(methods, hashForNodes):
@@ -104,13 +140,18 @@ def createGraph(methods, hashForNodes):
 
 			for i in range(len(callingMethods)-1):
 				for j in range(i+1,len(callingMethods)):
-
 					if type(callingMethods[i])==LabelledLine:
+						if (checkForIfWhile(callingMethods[i].line)):
+							continue
+
 						if callingMethods[i].modified==True:
 							modifiedNodes.add(callingMethods[i].line)
 						callingMethods[i]=callingMethods[i].line
 
 					if type(callingMethods[j])==LabelledLine:
+						if (checkForIfWhile(callingMethods[j].line)):
+							continue
+
 						if callingMethods[j].modified==True:
 							modifiedNodes.add(callingMethods[j].line)
 						callingMethods[j]= callingMethods[j].line
@@ -126,12 +167,19 @@ def createGraph(methods, hashForNodes):
 			for key,value in calledCalling[0].items() if len(calledCalling[0])>0 else []:
 
 				for s in list(value):
+
+
 					if type(key) == LabelledLine:
+						if (checkForIfWhile(key.line)):
+							continue
+
 						if key.modified == True:
 							modifiedNodes.add(key.line)
 						key = key.line
 
 					if type(s) == LabelledLine:
+						if (checkForIfWhile(s.line)):
+							continue
 						if s.modified == True:
 							modifiedNodes.add(s.line)
 						s = s.line
@@ -192,10 +240,15 @@ def updateGraph(djikstraGraph, methods, currHashForNodes, prevHashForNodes):
 			for i in range(len(callingMethods)-1):
 				for j in range(i+1,len(callingMethods)):
 					if type(callingMethods[i])==LabelledLine:
+						if (checkForIfWhile(callingMethods[i].line)):
+							continue
+
 						callingMethods[i]=callingMethods[i].line
 
 
 					if type(callingMethods[j])==LabelledLine:
+						if (checkForIfWhile(callingMethods[j].line)):
+							continue
 						callingMethods[j]= callingMethods[j].line
 
 					#encrypt the methods
@@ -222,9 +275,13 @@ def updateGraph(djikstraGraph, methods, currHashForNodes, prevHashForNodes):
 
 					for s in list(value):
 						if type(key) == LabelledLine:
+							if (checkForIfWhile(key.line)):
+								continue
 							key = key.line
 
 						if type(s) == LabelledLine:
+							if (checkForIfWhile(s.line)):
+								continue
 							s = s.line
 
 						currKey= encryptNode(key, currHashForNodes)
@@ -365,18 +422,17 @@ if __name__=='__main__':
 	commitId1 = '114d67c614847da0eb08bc2b27cde120bda2b3ff'
 	commitId2 = '4a8d243f4e4bb16bc627eb9de2f6d801250170e9'
 	#
-	project = 'hbase'
-	commitId3 = '4a8d243f4e4bb16bc627eb9de2f6d801250170e9'
-	commitId4 = '89af8294f42a9a16b91a09f7808653a71648718f'
+	# project = 'hbase'
+	# commitId3 = '4a8d243f4e4bb16bc627eb9de2f6d801250170e9'
+	# commitId4 = '89af8294f42a9a16b91a09f7808653a71648718f'
 
+	# # project = 'hbase'
+	# commitId1 = '7c3d11974bf7c2b4beb1a385cbab68d8175731b3'
+	# commitId2 = '66839c4c17b169f5f2b6f39374558d9a5c3bc2e2'
 
 	# project = 'hbase'
-	commitId1 = '7c3d11974bf7c2b4beb1a385cbab68d8175731b3'
-	commitId2 = '66839c4c17b169f5f2b6f39374558d9a5c3bc2e2'
-
-	# project = 'hbase'
-	# commitId3 = '66839c4c17b169f5f2b6f39374558d9a5c3bc2e2'
-	# commitId4 = 'a2fba1024dc32de7fd21513540f064433e7795b0'
+	commitId3 = '66839c4c17b169f5f2b6f39374558d9a5c3bc2e2'
+	commitId4 = 'a2fba1024dc32de7fd21513540f064433e7795b0'
 
 	# 'HADOOP-1391.': [('7c3d11974bf7c2b4beb1a385cbab68d8175731b3',
 	# 				  '66839c4c17b169f5f2b6f39374558d9a5c3bc2e2'),
@@ -384,7 +440,7 @@ if __name__=='__main__':
 	# 				  'a2fba1024dc32de7fd21513540f064433e7795b0'),
 
 	# commitId3 = '87f5d5dffd96e09d789a9063f8f6d98a75fb24dd'
-	# commitId4 = '6f42c1f60f8571c0d6fdb6e54be3fe2b6df0711c'
+	# commitId4 = 'f613907a98a732364c5a2a5f1f4ece7bc99f555e'
 
 
 	# DEBUG=False
