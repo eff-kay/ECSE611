@@ -18,10 +18,8 @@
                             '678403c4fe99baa676cc89ba24d6af8f7c3917b3'),
                         (   'a1edb70b8686bdb8d588f4233bc8dd251142b03f',
                             '956f5ba00214a5c8dd9a3451f33b3b63a737ff50')],
-    'HADOOP-1415': [   (   '2e49c9451bb1867454a7e16074ba8ba913872f2f',
-                           'a3073cc6dacc03756387a788de62498f1a64a411'),
-                       (   '13c1e482530f8bcf62035449b12fe99014f186b3',
-                           'cc8d45bd4779cf764760c83cec834193c8883adc')],
+
+
     'HADOOP-1426.': [   (   '4f855ae28c633956ae322cf35c3ffdc06c30c1fa',
                             'af766ddc9103e78c128600bdd5d49374f69ac7d5'),
                         (   'af766ddc9103e78c128600bdd5d49374f69ac7d5',

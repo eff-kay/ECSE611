@@ -419,33 +419,12 @@ def calculateScoresFromCommits(project, commitId1, commitId2, commitId3, commitI
 
 if __name__=='__main__':
 	project = 'hbase'
-	commitId1 = '114d67c614847da0eb08bc2b27cde120bda2b3ff'
-	commitId2 = '4a8d243f4e4bb16bc627eb9de2f6d801250170e9'
-	#
-	# project = 'hbase'
-	# commitId3 = '4a8d243f4e4bb16bc627eb9de2f6d801250170e9'
-	# commitId4 = '89af8294f42a9a16b91a09f7808653a71648718f'
-
-	# # project = 'hbase'
-	# commitId1 = '7c3d11974bf7c2b4beb1a385cbab68d8175731b3'
-	# commitId2 = '66839c4c17b169f5f2b6f39374558d9a5c3bc2e2'
+	commitId1 = 'a9acbeab0800dd1d3c13aaaea07d2975b0f49cb4'
+	commitId2 = '5b1bd1f8f2d614c945f6a5889a9d4f25b87fe172'
 
 	# project = 'hbase'
-	commitId3 = '66839c4c17b169f5f2b6f39374558d9a5c3bc2e2'
-	commitId4 = 'a2fba1024dc32de7fd21513540f064433e7795b0'
-
-	# 'HADOOP-1391.': [('7c3d11974bf7c2b4beb1a385cbab68d8175731b3',
-	# 				  '66839c4c17b169f5f2b6f39374558d9a5c3bc2e2'),
-	# 				 ('66839c4c17b169f5f2b6f39374558d9a5c3bc2e2',
-	# 				  'a2fba1024dc32de7fd21513540f064433e7795b0'),
-
-	# commitId3 = '87f5d5dffd96e09d789a9063f8f6d98a75fb24dd'
-	# commitId4 = 'f613907a98a732364c5a2a5f1f4ece7bc99f555e'
-
-
-	# DEBUG=False
-	# BACKUP = True
-
+	commitId3 = 'cbb844d5f0be591c76e84e325b40fc313851d57c'
+	commitId4 = '5463de47b3f41a254eb3159b6963f3c92f660388'
 
 	#update the interface to calculate the threshold.
 	print(calculateScoresFromCommits(project, commitId1, commitId2, commitId3, commitId4))
