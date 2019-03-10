@@ -49,9 +49,6 @@ if __name__ == '__main__':
         s = f.read()
         fileData = ast.literal_eval(s)
     score = 0
-    tp = 0
-    fn = 0
-    pairs = 0
 
     for k, v in fileData.items():
         print("For issue Number: ", k)
@@ -65,17 +62,9 @@ if __name__ == '__main__':
         commitId4 = v[1][1]
         try:
             score = calculateScoresFromCommits(project, commitId1, commitId2, commitId3, commitId4)
-            if Decimal(score) > 0.5:
-                tp = tp + 1
-            else:
-                fn = fn + 1
-            pairs = pairs + 1
             print(commitId1," ", commitId2," ", commitId3," ", commitId4)
             print(score)
             temp_list = k+","+commitId1+","+commitId2+","+commitId3+","+commitId4+","+str(score)
-            print("True Positive Count: ",tp)
-            print("False Negative Count: ", fn)
-            print("Total Pairs Analyzed: ",pairs)
             write_to_file("scores.txt", temp_list)
         except Exception:
             error_issue = k + "," + commitId1 + "," + commitId2 + "," + commitId3 + "," + commitId4
