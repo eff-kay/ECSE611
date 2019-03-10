@@ -1,6 +1,12 @@
 from getGraphFromPatch import calculateScoresFromCommits
+from decimal import Decimal
 
 import ast
+
+
+def write_to_file(scores):
+    with open("scores.txt","a") as myfile:
+        myfile.write(scores+"\n")
 
 if __name__ == '__main__':
     with open('Issue2Commits.txt', 'r') as f:
@@ -10,7 +16,7 @@ if __name__ == '__main__':
     tp = 0
     fn = 0
     pairs = 0
-    score_list = []
+
     for k, v in fileData.items():
         print("For issue Number: ", k)
         temp_list = ""
@@ -21,18 +27,21 @@ if __name__ == '__main__':
         project = 'hbase'
         commitId3 = v[1][0]
         commitId4 = v[1][1]
+        try:
+            score = calculateScoresFromCommits(project, commitId1, commitId2, commitId3, commitId4)
+            if Decimal(score) > 0.5:
+                tp = tp + 1
+            else:
+                fn = fn + 1
+            pairs = pairs + 1
+            print(commitId1," ", commitId2," ", commitId3," ", commitId4)
+            print(score)
+            temp_list = k+","+commitId1+" "+commitId2+" "+commitId3+" "+commitId4+","+str(score)
+            print("True Positive Count: ",tp)
+            print("False Negative Count: ", fn)
+            print("Total Pairs Analyzed: ",pairs)
+            write_to_file(temp_list)
+        except Exception:
+            pass
 
-        score = calculateScoresFromCommits(project, commitId1, commitId2, commitId3, commitId4)
-        if score>=0.6:
-            tp = tp + 1
-        else:
-            fn = fn + 1
-        pairs = pairs + 1
-        print(commitId1," ", commitId2," ", commitId3," ", commitId4)
-        print(score)
-        temp_list = k+","+commitId1+" "+commitId2+" "+commitId3+" "+commitId4+","+str(score)
-        score_list.append(temp_list)
-        print("True Positive Count: ",tp)
-        print("False Negative Count: ", fn)
-        print("Total Pairs Analyzed: ",pairs)
-    print(score_list)
+    print(temp_list)
