@@ -8,7 +8,7 @@ def write_to_file(filename, data):
 
 
 def testFiles():
-    with open('../Patches/Issue2Commits.txt', 'r+') as f:
+    with open('../Patches/Issue2CommitsHive.txt', 'r+') as f:
         s = f.read()
         fileData = ast.literal_eval(s)
     score = 0
@@ -19,11 +19,11 @@ def testFiles():
     for k, v in fileData.items():
         print("For issue Number: ", k)
         temp_list = ""
-        project = 'hbase'
+        project = 'hive'
         commitId1 = v[0][0]
         commitId2 = v[0][1]
 
-        project = 'hbase'
+        project = 'hive'
         commitId3 = v[1][0]
         commitId4 = v[1][1]
         try:
@@ -45,7 +45,7 @@ def testFiles():
             write_to_file("error.txt", error_issue)
 
 if __name__ == '__main__':
-    with open('../Patches/Issue2Commits.txt', 'r+') as f:
+    with open('../Patches/Issue2CommitsHive.txt', 'r+') as f:
         s = f.read()
         fileData = ast.literal_eval(s)
     score = 0
@@ -53,11 +53,11 @@ if __name__ == '__main__':
     for k, v in fileData.items():
         print("For issue Number: ", k)
         temp_list = ""
-        project = 'hbase'
+        project = 'hive'
         commitId1 = v[0][0]
         commitId2 = v[0][1]
 
-        project = 'hbase'
+        project = 'hive'
         commitId3 = v[1][0]
         commitId4 = v[1][1]
         try:

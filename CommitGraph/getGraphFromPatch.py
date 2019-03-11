@@ -418,9 +418,9 @@ def calculateScoresFromCommits(project, commitId1, commitId2, commitId3, commitI
 	return float("{0:.2f}".format(score))
 
 if __name__=='__main__':
-	project = 'hbase'
-	commitId1 = '114d67c614847da0eb08bc2b27cde120bda2b3ff'
-	commitId2 = '4a8d243f4e4bb16bc627eb9de2f6d801250170e9'
+	project = 'hive'
+	# commitId1 = '114d67c614847da0eb08bc2b27cde120bda2b3ff'
+	# commitId2 = '4a8d243f4e4bb16bc627eb9de2f6d801250170e9'
 	#
 	# project = 'hbase'
 	# commitId3 = '4a8d243f4e4bb16bc627eb9de2f6d801250170e9'
@@ -431,8 +431,13 @@ if __name__=='__main__':
 	# commitId2 = '66839c4c17b169f5f2b6f39374558d9a5c3bc2e2'
 
 	# project = 'hbase'
-	commitId3 = '66839c4c17b169f5f2b6f39374558d9a5c3bc2e2'
-	commitId4 = 'a2fba1024dc32de7fd21513540f064433e7795b0'
+	# commitId3 = '66839c4c17b169f5f2b6f39374558d9a5c3bc2e2'
+	# commitId4 = 'a2fba1024dc32de7fd21513540f064433e7795b0'
+
+	commitId1= "20e595399f65af6a25ef9c2356e0e46496ec0c0b"
+	commitId2= "8f3b312e049c3892b3fd80e009b2c1aa8869e8ea"
+	commitId3= "b13eba000e1cce39a7449b289c659c2f236ce9c9"
+	commitId4= "0417cef9d5748ed12f5a29dd5d59486ef2e20311"
 
 	# 'HADOOP-1391.': [('7c3d11974bf7c2b4beb1a385cbab68d8175731b3',
 	# 				  '66839c4c17b169f5f2b6f39374558d9a5c3bc2e2'),
