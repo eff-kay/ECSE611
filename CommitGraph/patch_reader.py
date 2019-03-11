@@ -121,17 +121,20 @@ class PatchReader:
         return methods
 
 if __name__ == '__main__':
+    commit_1 = '39fb8c4666d7462c38bf36d4a16ecc50bce61204'
+    commit_2 = 'c14dd4f5153caaa4c2ed9d45c3573a279bae553e'
 
     patch = get_patch(
             'hbase',
-            '2e49c9451bb1867454a7e16074ba8ba913872f2f',
-            'a3073cc6dacc03756387a788de62498f1a64a411')
+            commit_1,
+            commit_2)
 
     ps = PatchSplitter('hbase',
-            '2e49c9451bb1867454a7e16074ba8ba913872f2f',
-            'a3073cc6dacc03756387a788de62498f1a64a411')
+            commit_1,
+            commit_2)
 
     patches = ps.split_by_diff_section(patch)
     methods = ps.all_modified_methods(patches)
 
+    import pdb; pdb.set_trace()
     print(methods)

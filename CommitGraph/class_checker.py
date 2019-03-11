@@ -3,6 +3,7 @@ import re
 class ClassChecker:
     CHECKS = [
         'has_keyword_class',
+        'not_in_string',
     ]
 
     def __init__(self, potential):
@@ -43,3 +44,6 @@ class ClassChecker:
 
     def has_keyword_class(self):
         return re.match(r'.*\s*class\s.*', self.potential)
+
+    def not_in_string(self):
+        return '"' not in self.potential

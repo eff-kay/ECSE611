@@ -19,3 +19,6 @@ class TestClassChecker(unittest.TestCase):
     def test_method_call_with_signature_inside(self):
         cc = self.cc('.registerTypeAdapter(LongAddr.class, new TypeAdapter<LongAdder>() {')
         assert not cc
+
+    def test_word_class_in_string(self):
+        assert not self.cc('public static final String OPT_GENERATOR_USAGE = "The class which generates load for the tool."')

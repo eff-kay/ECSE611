@@ -24,7 +24,7 @@ class Change:
     ]
 
     METHOD_STARTS = [
-        r'^[private|public]',
+        r'^[private|public|protected]',
     ]
 
     ChangedLine = collections.namedtuple(

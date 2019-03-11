@@ -79,14 +79,8 @@ class MethodChecker:
 
         g = match.group(1)
 
-        if ',' in g:
-            klass, name = g.split('.')
-
-            if klass.isupper():
-                return True
-
-            if klass[0].isupper():
-                return False
+        if '.' in g:
+            return True
 
         if g.isupper():
             return True

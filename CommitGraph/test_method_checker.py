@@ -27,3 +27,6 @@ class TestFunctionChecker(unittest.TestCase):
 
     def test_is_not_class(self):
         assert not self.mc('SuppressWarnings("unused")')
+
+    def test_forms_assignment(self):
+        assert self.mc('private static final Log LOG = LogFactory.getLog(LoadTestTool.class)')

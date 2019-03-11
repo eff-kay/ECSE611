@@ -41,3 +41,9 @@ class TestFunctionChecker(unittest.TestCase):
 
     def test_with_prototype(self):
         assert not self.fc('void write(String key, String value) throws IOException;')
+
+    def test_with_protected(self):
+        assert self.fc('protected String[] splitColonSeparated(String option,')
+
+    def test_with_private(self):
+        assert self.fc('private void parseColumnFamilyOptions(CommandLine cmd) {')
