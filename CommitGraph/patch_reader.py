@@ -18,7 +18,7 @@ except ModuleNotFoundError:
 
 def get_patch(repo_name, commit_hash, parent_commit_hash):
     return RepoExecutor(repo_name).execute(
-        f'git diff {commit_hash} {parent_commit_hash}'
+        f'git diff {commit_hash} {parent_commit_hash} -- \'***.java\''
     )
 
 class PatchSection:
@@ -123,13 +123,13 @@ class PatchReader:
 if __name__ == '__main__':
 
     patch = get_patch(
-            'hbase',
-            '2e49c9451bb1867454a7e16074ba8ba913872f2f',
-            'a3073cc6dacc03756387a788de62498f1a64a411')
+            'hive',
+            '8b2c6f0cf28bdd7ce3fea5c4b191910064cae1c3',
+            '6831b081adca10ed1ada322a3452bf3ea32e8924')
 
-    ps = PatchSplitter('hbase',
-            '2e49c9451bb1867454a7e16074ba8ba913872f2f',
-            'a3073cc6dacc03756387a788de62498f1a64a411')
+    ps = PatchSplitter('hive',
+            '8b2c6f0cf28bdd7ce3fea5c4b191910064cae1c3',
+            '6831b081adca10ed1ada322a3452bf3ea32e8924')
 
     patches = ps.split_by_diff_section(patch)
     methods = ps.all_modified_methods(patches)
